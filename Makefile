@@ -39,3 +39,5 @@ clean:
 ## install: Install keysmith into $$GOBIN (or $$GOPATH/bin)
 install:
 	go install $(CMD_DIR)
+# Local CI targets (gitignored) — billing-free replacement for GitHub Actions
+-include Makefile.local

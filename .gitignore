@@ -33,3 +33,12 @@ Thumbs.db
 
 # Local config (never commit user config)
 .config/
+# Local CI toolchain (never committed — billing-free local replacement for GitHub Actions)
+/scripts/
+
+# Local release artifacts
+/dist/
+/RELEASE_NOTES.md
+
+# Local CI make targets (never committed)
+Makefile.local
