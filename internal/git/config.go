@@ -6,13 +6,13 @@ package git
 // SigningConfig holds the git config values written by 'keysmith
 // git-config'.
 type SigningConfig struct {
-	UserName       string
-	UserEmail      string
-	SigningKeyID   string
-	CommitGpgSign  bool
-	TagGpgSign     bool
-	GpgFormat      string // "openpgp" or "x509"
-	Global         bool   // write to --global instead of --local
+	UserName      string
+	UserEmail     string
+	SigningKeyID  string
+	CommitGpgSign bool
+	TagGpgSign    bool
+	GpgFormat     string // "openpgp" or "x509"
+	Global        bool   // write to --global instead of --local
 }
 
 // Apply writes the signing config via 'git config [--global] <key>
