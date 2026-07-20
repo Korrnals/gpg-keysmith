@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-label="gpg-keysmith banner">
+  <rect width="1200" height="300" fill="#ffffff"/>
+  <!-- Left accent bar -->
+  <rect x="0" y="0" width="14" height="300" fill="#0f766e"/>
+  <!-- Key + lock emblem -->
+  <g transform="translate(110,150)">
+    <!-- Lock body -->
+    <rect x="-42" y="-10" width="84" height="70" rx="10" ry="10" fill="#0f4c5c"/>
+    <!-- Shackle -->
+    <path d="M -28 -10 v -22 a 28 28 0 0 1 56 0 v 22" fill="none" stroke="#0f4c5c" stroke-width="12" stroke-linecap="round"/>
+    <!-- Keyhole -->
+    <circle cx="0" cy="18" r="9" fill="#ffffff"/>
+    <rect x="-3.5" y="18" width="7" height="22" fill="#ffffff"/>
+    <!-- Key shaft emerging from the right of the lock -->
+    <g transform="translate(50,25)">
+      <rect x="0" y="-7" width="86" height="14" rx="3" fill="#0f766e"/>
+      <circle cx="86" cy="0" r="16" fill="none" stroke="#0f766e" stroke-width="6"/>
+      <circle cx="86" cy="0" r="5" fill="#0f766e"/>
+      <rect x="60" y="7" width="10" height="14" fill="#0f766e"/>
+      <rect x="76" y="7" width="10" height="14" fill="#0f766e"/>
+    </g>
+  </g>
+  <!-- Title -->
+  <text x="320" y="155" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="84" font-weight="700" fill="#0f2a38" letter-spacing="-1.5">gpg-keysmith</text>
+  <!-- Tagline -->
+  <text x="324" y="208" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="32" font-weight="400" fill="#475569">Automated GPG key → signed GitHub commits</text>
+  <!-- Underline -->
+  <rect x="324" y="232" width="360" height="3" fill="#0f766e"/>
+</svg>
