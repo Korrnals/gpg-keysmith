@@ -242,6 +242,28 @@ var stepRunners = map[string]stepRunner{
 	StepPublish:   stepPublishRunner,
 }
 
+// --- Function-variable seams for the real step bodies ------------------
+//
+// The step* functions shell out to real gpg/git/gh binaries. To unit-
+// test the step bodies (input handling, state plumbing, branching)
+// without spawning those binaries, the calls are routed through
+// package-level function variables. Tests override them with mocks
+// (save/restore via t.Cleanup) and pre-fill every WizardOptions field
+// so no survey prompt fires. Production code calls the real functions
+// through this indirection — the only production change is the
+// `var xFn = x` hoist plus the `xFn(...)` call site swap.
+var (
+	gpgDetectExistingKeysFn     = gpg.DetectExistingKeys
+	gpgGenerateKeyFn            = gpg.GenerateKey
+	gpgExportPublicKeyFn        = gpg.ExportPublicKey
+	gpgExportPrivateKeyFn       = gpg.ExportPrivateKey
+	gitApplyGitConfigFn         = git.ApplyGitConfig
+	githubUploadPublicKeyFn     = github.UploadPublicKeyWithFingerprint
+	githubSetGPGSecretsFn       = github.SetGPGSecrets
+	githubCommitPublicKeyFileFn = github.CommitPublicKeyFile
+	keyserverPublishPubKeyFn    = keyserver.PublishPubKey
+)
+
 // --- Real step implementations -----------------------------------------
 //
 // Each stepRunner wrapper delegates to a private step function with
@@ -255,7 +277,7 @@ var stepRunners = map[string]stepRunner{
 // a no-op (the wizard still records it as completed so the resume
 // order is preserved).
 func stepDetect(state *WizardState) error {
-	keys, err := gpg.DetectExistingKeys()
+	keys, err := gpgDetectExistingKeysFn()
 	if err != nil {
 		return fmt.Errorf("detect: %w", err)
 	}
@@ -340,7 +362,7 @@ func stepGenerate(state *WizardState, opts WizardOptions) error {
 		Expiry:     opts.Expiry,
 		Passphrase: state.Passphrase,
 	}
-	keyID, err := gpg.GenerateKey(genOpts)
+	keyID, err := gpgGenerateKeyFn(genOpts)
 	if err != nil {
 		return fmt.Errorf("generate: %w", err)
 	}
@@ -374,11 +396,11 @@ func stepExport(state *WizardState, opts WizardOptions) error {
 		state.Passphrase = opts.Passphrase
 	}
 
-	pubArmor, err := gpg.ExportPublicKey(state.KeyID)
+	pubArmor, err := gpgExportPublicKeyFn(state.KeyID)
 	if err != nil {
 		return fmt.Errorf("export: public key: %w", err)
 	}
-	privArmor, err := gpg.ExportPrivateKey(state.KeyID, state.Passphrase)
+	privArmor, err := gpgExportPrivateKeyFn(state.KeyID, state.Passphrase)
 	if err != nil {
 		return fmt.Errorf("export: private key: %w", err)
 	}
@@ -405,7 +427,7 @@ func stepGitConfig(state *WizardState, opts WizardOptions) error {
 		Email:  state.Email,
 		Global: false,
 	}
-	if err := git.ApplyGitConfig(gitOpts); err != nil {
+	if err := gitApplyGitConfigFn(gitOpts); err != nil {
 		return fmt.Errorf("git-config: %w", err)
 	}
 	fmt.Printf("  Git signing configured for key %s (local repo config).\n", state.KeyID)
@@ -468,7 +490,7 @@ func stepGitHub(state *WizardState, opts WizardOptions) error {
 
 	// Look up the fingerprint from detect for dedup.
 	fingerprint := ""
-	if keys, err := gpg.DetectExistingKeys(); err == nil {
+	if keys, err := gpgDetectExistingKeysFn(); err == nil {
 		for _, k := range keys {
 			if k.KeyID == state.KeyID {
 				fingerprint = k.Fingerprint
@@ -478,20 +500,20 @@ func stepGitHub(state *WizardState, opts WizardOptions) error {
 	}
 
 	fmt.Println("  ==> Uploading public key to GitHub...")
-	uploadedFP, err := github.UploadPublicKeyWithFingerprint(token, state.PubKeyArmor, fingerprint)
+	uploadedFP, err := githubUploadPublicKeyFn(token, state.PubKeyArmor, fingerprint)
 	if err != nil {
 		return fmt.Errorf("github: upload public key: %w", err)
 	}
 	fmt.Printf("      Public key uploaded (fingerprint: %s)\n", uploadedFP)
 
 	fmt.Println("  ==> Setting repo secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE...")
-	if err := github.SetGPGSecrets(token, owner, name, state.PrivateKey, state.Passphrase); err != nil {
+	if err := githubSetGPGSecretsFn(token, owner, name, state.PrivateKey, state.Passphrase); err != nil {
 		return fmt.Errorf("github: set repo secrets: %w", err)
 	}
 	fmt.Println("      Secrets set: GPG_PRIVATE_KEY, GPG_PASSPHRASE")
 
 	fmt.Println("  ==> Committing gpg-public-key.asc and opening PR...")
-	prURL, err := github.CommitPublicKeyFile(token, owner, name, state.PubKeyArmor)
+	prURL, err := githubCommitPublicKeyFileFn(token, owner, name, state.PubKeyArmor)
 	if err != nil {
 		return fmt.Errorf("github: commit + open PR: %w", err)
 	}
@@ -513,7 +535,7 @@ func stepPublish(state *WizardState, opts WizardOptions) error {
 	}
 	// Look up the fingerprint for the verification URL.
 	fingerprint := ""
-	if keys, err := gpg.DetectExistingKeys(); err == nil {
+	if keys, err := gpgDetectExistingKeysFn(); err == nil {
 		for _, k := range keys {
 			if k.KeyID == state.KeyID {
 				fingerprint = k.Fingerprint
@@ -521,7 +543,7 @@ func stepPublish(state *WizardState, opts WizardOptions) error {
 			}
 		}
 	}
-	results, err := keyserver.PublishPubKey(keyserver.PublishOptions{
+	results, err := keyserverPublishPubKeyFn(keyserver.PublishOptions{
 		ArmoredPubKey: state.PubKeyArmor,
 		Keyserver:     ks,
 		Fingerprint:   fingerprint,

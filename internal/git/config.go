@@ -129,7 +129,12 @@ func gitConfigScope(global bool) []string {
 // a nil error if the key is set; returns ("", nil) if the key is not
 // set (exit code 1 from git config --get is the "not found" signal,
 // not an error); returns an error only if git fails to run.
-func runGitConfigGet(global bool, key string) (string, error) {
+//
+// runGitConfigGet is a package var so tests can override it to return
+// canned values without shelling out to real git. ApplyGitConfig and
+// DetectSigningKey call it via this indirection only in the
+// name/email/signingkey resolution paths.
+var runGitConfigGet = func(global bool, key string) (string, error) {
 	args := append(append([]string{}, "config"), append(gitConfigScope(global), "--get", key)...)
 	cmd := exec.Command("git", args...)
 	var stdout, stderr bytes.Buffer
@@ -150,7 +155,11 @@ func runGitConfigGet(global bool, key string) (string, error) {
 // runGitConfigSet writes a single git config value via
 // 'git config [--global] <key> <value>'. Returns an error if git
 // fails. This is the only mutating call in the package.
-func runGitConfigSet(global bool, key, value string) error {
+//
+// runGitConfigSet is a package var so tests can override it without
+// shelling out to real git. ApplyGitConfig calls it via this
+// indirection when writing the six signing config keys.
+var runGitConfigSet = func(global bool, key, value string) error {
 	args := append(append([]string{}, "config"), append(gitConfigScope(global), key, value)...)
 	cmd := exec.Command("git", args...)
 	var stderr bytes.Buffer
