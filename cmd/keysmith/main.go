@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
+	"github.com/Korrnals/gpg-keysmith/internal/git"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
 	"github.com/spf13/cobra"
 )
@@ -99,12 +100,37 @@ var githubCmd = &cobra.Command{
 
 var gitConfigCmd = &cobra.Command{
 	Use:   "git-config",
-	Short: "Configure git signing settings (stub)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintln(cmd.OutOrStdout(), "git-config: not implemented yet")
-		return nil
-	},
+	Short: "Configure git signing settings (user.signingkey, commit.gpgsign, gpg.format, tag.gpgsign)",
+	Long: `Configure the local git repository (or --global user config) to sign commits
+and tags with a GPG key. Sets six config keys:
+
+  user.name          — real name for the commit author
+  user.email         — email for the commit author
+  user.signingkey    — the GPG key id to sign with
+  commit.gpgsign     — true (sign every commit)
+  gpg.format         — openpgp (this tool only supports OpenPGP)
+  tag.gpgsign        — true (sign every tag)
+
+If --name or --email are not given, the existing user.name / user.email
+are read from git config and preserved. If they are not set anywhere,
+an error is returned telling you to pass --name/--email or set them
+first.
+
+If --keyid is not given, the existing user.signingkey is read from git
+config; if that is also unset, 'gpg --list-secret-keys' is scanned and
+you are prompted to pick a key. If no GPG keys exist, the command
+errors with a hint to run 'keysmith generate' first.`,
+	Args: cobra.NoArgs,
+	RunE: runGitConfig,
 }
+
+// git-config command flags.
+var (
+	gcKeyID  string
+	gcName   string
+	gcEmail  string
+	gcGlobal bool
+)
 
 var publishCmd = &cobra.Command{
 	Use:   "publish",
@@ -154,6 +180,11 @@ func init() {
 	exportCmd.Flags().StringVar(&expKeyID, "keyid", "", "long-form key id or fingerprint to export")
 	exportCmd.Flags().StringVar(&expEmail, "email", "", "email of the key to export (alternative to --keyid)")
 	exportCmd.Flags().StringVar(&expPubkey, "pubkey", "gpg-public-key.asc", "output path for the ASCII-armored public key")
+
+	gitConfigCmd.Flags().StringVar(&gcKeyID, "keyid", "", "GPG key id to set as user.signingkey (if empty, read from existing config or pick interactively)")
+	gitConfigCmd.Flags().StringVar(&gcName, "name", "", "real name to set as user.name (if empty, keep existing)")
+	gitConfigCmd.Flags().StringVar(&gcEmail, "email", "", "email to set as user.email (if empty, keep existing)")
+	gitConfigCmd.Flags().BoolVar(&gcGlobal, "global", false, "write to the global user config instead of the local repo config")
 }
 
 func runDetect(cmd *cobra.Command, args []string) error {
@@ -375,6 +406,108 @@ func runExport(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(out, "Private key captured in memory (not written to disk) —")
 	fmt.Fprintln(out, "will be used by 'github' command in M6.")
 	return nil
+}
+
+// runGitConfig resolves the signing key id (from --keyid, existing
+// user.signingkey, or an interactive pick from DetectExistingKeys),
+// resolves name/email (from flags or existing config), then calls
+// git.ApplyGitConfig to write the six signing-related config keys.
+//
+// Key-id resolution precedence:
+//  1. --keyid flag (validated as hex before use)
+//  2. existing user.signingkey from git config (same scope as --global)
+//  3. interactive pick from 'gpg --list-secret-keys' via survey.Select
+//  4. error: no GPG keys found → run 'keysmith generate' first
+//
+// Name/email resolution is delegated to ApplyGitConfig: if the flags
+// are empty, it reads the existing config and errors if missing.
+func runGitConfig(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+
+	keyID := gcKeyID
+
+	// If --keyid is empty, try the existing user.signingkey from git
+	// config (same scope as --global). If that is also empty, scan the
+	// GPG keyring and prompt the user to pick a key.
+	if keyID == "" {
+		existing, err := git.DetectSigningKey(gcGlobal)
+		if err != nil {
+			return fmt.Errorf("git-config: read existing user.signingkey: %w", err)
+		}
+		if existing != "" {
+			keyID = existing
+			fmt.Fprintf(out, "Reusing existing user.signingkey: %s\n", keyID)
+		}
+	}
+
+	if keyID == "" {
+		// Interactive: list GPG keys and let the user pick one.
+		keys, err := gpg.DetectExistingKeys()
+		if err != nil {
+			return fmt.Errorf("git-config: detect existing GPG keys: %w", err)
+		}
+		if len(keys) == 0 {
+			return fmt.Errorf("git-config: no GPG key found. Run 'keysmith generate' first")
+		}
+		options := make([]string, 0, len(keys))
+		for _, k := range keys {
+			options = append(options, fmt.Sprintf("%s  %s", k.KeyID, k.UserId))
+		}
+		var choice string
+		prompt := &survey.Select{
+			Message: "Select a GPG key to use for signing:",
+			Options: options,
+		}
+		if err := survey.AskOne(prompt, &choice); err != nil {
+			return fmt.Errorf("git-config: key selection: %w", err)
+		}
+		// choice is "<keyid>  <userid>" — take the first field.
+		if i := strings.IndexByte(choice, ' '); i > 0 {
+			keyID = choice[:i]
+		} else {
+			keyID = choice
+		}
+	}
+
+	opts := git.ConfigOptions{
+		KeyID:  keyID,
+		Name:   gcName,
+		Email:  gcEmail,
+		Global: gcGlobal,
+	}
+	if err := git.ApplyGitConfig(opts); err != nil {
+		return fmt.Errorf("git-config: %w", err)
+	}
+
+	// Print a summary of what was set. Re-read the resolved name/email
+	// from the config we just wrote so the summary reflects the actual
+	// stored values (ApplyGitConfig may have read them from existing
+	// config).
+	scope := "local repo config"
+	if gcGlobal {
+		scope = "global user config"
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Git signing configured (%s):\n", scope)
+	fmt.Fprintf(out, "  user.name         = %s\n", nonEmptyOr(gcName, "(kept existing)"))
+	fmt.Fprintf(out, "  user.email        = %s\n", nonEmptyOr(gcEmail, "(kept existing)"))
+	fmt.Fprintf(out, "  user.signingkey   = %s\n", keyID)
+	fmt.Fprintf(out, "  commit.gpgsign    = true\n")
+	fmt.Fprintf(out, "  gpg.format        = openpgp\n")
+	fmt.Fprintf(out, "  tag.gpgsign       = true\n")
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Verify with: git config --local --list | grep -E 'gpg|signingkey'")
+	fmt.Fprintln(out, "Test a signed commit: git commit -S --allow-empty -m test && git verify-commit HEAD")
+	return nil
+}
+
+// nonEmptyOr returns s if non-empty, otherwise the fallback string.
+// Used for the summary so a kept-existing value is displayed clearly.
+func nonEmptyOr(s, fallback string) string {
+	if s == "" {
+		return fallback
+	}
+	return s
 }
 
 func main() {
