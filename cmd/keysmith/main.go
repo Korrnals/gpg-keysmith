@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/Korrnals/gpg-keysmith/internal/git"
+	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
 	"github.com/spf13/cobra"
 )
@@ -91,12 +93,36 @@ var (
 
 var githubCmd = &cobra.Command{
 	Use:   "github",
-	Short: "Upload public key, set repo secrets, open PR (stub)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintln(cmd.OutOrStdout(), "github: not implemented yet")
-		return nil
-	},
+	Short: "Upload public key to GitHub, set repo secrets, open PR",
+	Long: `Upload the GPG public key to the authenticated user's GitHub account, store the
+private key and passphrase as repository Action secrets (GPG_PRIVATE_KEY and
+GPG_PASSPHRASE), and commit the public key file to the target repo on a
+chore/add-gpg-public-key branch and open a pull request.
+
+Requires a GitHub PAT with admin:gpg_key (for the public key upload) and repo +
+admin:repo_hook scopes (for the repo secrets). The 'gh' CLI must be installed
+(https://cli.github.com) for the secrets step — gpg-keysmith shells out to
+'gh secret set' to avoid a libsodium native binding dependency.
+
+Token resolution precedence:
+  1. --token flag
+  2. GITHUB_TOKEN env var
+  3. GH_TOKEN env var
+
+If --keyid is empty, the key is picked interactively from 'gpg --list-secret-keys'.
+If --pubkey-file is set, the armored public key is read from that file instead
+of calling gpg --export.`,
+	Args: cobra.NoArgs,
+	RunE: runGithub,
 }
+
+// github command flags.
+var (
+	ghRepo       string
+	ghToken      string
+	ghKeyID      string
+	ghPubkeyFile string
+)
 
 var gitConfigCmd = &cobra.Command{
 	Use:   "git-config",
@@ -185,6 +211,11 @@ func init() {
 	gitConfigCmd.Flags().StringVar(&gcName, "name", "", "real name to set as user.name (if empty, keep existing)")
 	gitConfigCmd.Flags().StringVar(&gcEmail, "email", "", "email to set as user.email (if empty, keep existing)")
 	gitConfigCmd.Flags().BoolVar(&gcGlobal, "global", false, "write to the global user config instead of the local repo config")
+
+	githubCmd.Flags().StringVar(&ghRepo, "repo", "", "target repo as owner/name (required)")
+	githubCmd.Flags().StringVar(&ghToken, "token", "", "GitHub PAT (if empty, read GITHUB_TOKEN or GH_TOKEN env var)")
+	githubCmd.Flags().StringVar(&ghKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
+	githubCmd.Flags().StringVar(&ghPubkeyFile, "pubkey-file", "", "read armored public key from this file instead of calling gpg --export")
 }
 
 func runDetect(cmd *cobra.Command, args []string) error {
@@ -508,6 +539,209 @@ func nonEmptyOr(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// runGithub implements the 'github' subcommand. It:
+//  1. Resolves the target repo (owner/name) from --repo.
+//  2. Resolves the GitHub token (--token > GITHUB_TOKEN > GH_TOKEN).
+//  3. Resolves the GPG key id (--keyid > interactive pick from detect).
+//  4. Obtains the armored public key (--pubkey-file > gpg.ExportPublicKey).
+//  5. Looks up the fingerprint for the chosen key (for dedup).
+//  6. Prompts for the passphrase via survey.Password (masked).
+//  7. Exports the private key via gpg.ExportPrivateKey (in-memory only).
+//  8. Uploads the public key to GitHub (skips if already present).
+//  9. Sets GPG_PRIVATE_KEY and GPG_PASSPHRASE repo secrets via gh CLI.
+//
+// 10. Commits gpg-public-key.asc to the repo and opens a PR.
+//
+// If any step fails, the function prints what succeeded and what
+// failed before returning the error — the user is never left in a
+// half-state without diagnostics.
+//
+// Security: token, private key, and passphrase are NEVER logged,
+// printed, or written to disk. Error messages use <REDACTED> for
+// secret values.
+func runGithub(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+
+	// 1. Resolve repo. Must be "owner/name".
+	if ghRepo == "" {
+		return fmt.Errorf("github: --repo is required (format owner/name)")
+	}
+	parts := strings.SplitN(ghRepo, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[1], "/") {
+		return fmt.Errorf("github: --repo must be 'owner/name' (got %q)", ghRepo)
+	}
+	owner, repo := parts[0], parts[1]
+
+	// 2. Resolve token. --token > GITHUB_TOKEN > GH_TOKEN.
+	token := ghToken
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	if token == "" {
+		token = os.Getenv("GH_TOKEN")
+	}
+	if token == "" {
+		return fmt.Errorf("github: GitHub token required (set GITHUB_TOKEN env or pass --token)")
+	}
+
+	// 3. Resolve key id. --keyid > interactive pick from detect.
+	keyID := ghKeyID
+	if keyID == "" {
+		keys, err := gpg.DetectExistingKeys()
+		if err != nil {
+			return fmt.Errorf("github: detect existing GPG keys: %w", err)
+		}
+		if len(keys) == 0 {
+			return fmt.Errorf("github: no GPG keys found; run 'keysmith generate' first")
+		}
+		options := make([]string, 0, len(keys))
+		for _, k := range keys {
+			options = append(options, fmt.Sprintf("%s  %s", k.KeyID, k.UserId))
+		}
+		var choice string
+		prompt := &survey.Select{
+			Message: "Select a GPG key to use:",
+			Options: options,
+		}
+		if err := survey.AskOne(prompt, &choice); err != nil {
+			return fmt.Errorf("github: key selection: %w", err)
+		}
+		if i := strings.IndexByte(choice, ' '); i > 0 {
+			keyID = choice[:i]
+		} else {
+			keyID = choice
+		}
+	}
+
+	// 4. Obtain the armored public key. --pubkey-file > gpg export.
+	var pubArmor string
+	if ghPubkeyFile != "" {
+		b, err := os.ReadFile(ghPubkeyFile)
+		if err != nil {
+			return fmt.Errorf("github: read pubkey file %s: %w", ghPubkeyFile, err)
+		}
+		pubArmor = string(b)
+	} else {
+		a, err := gpg.ExportPublicKey(keyID)
+		if err != nil {
+			return fmt.Errorf("github: export public key: %w", err)
+		}
+		pubArmor = a
+	}
+
+	// 5. Look up the fingerprint from detect (for dedup).
+	fingerprint := ""
+	if keys, err := gpg.DetectExistingKeys(); err == nil {
+		for _, k := range keys {
+			if k.KeyID == keyID {
+				fingerprint = k.Fingerprint
+				break
+			}
+		}
+	}
+
+	// 6. Prompt for the passphrase (masked). Needed to export the
+	// private key for the repo secrets step.
+	var passphrase string
+	passPrompt := &survey.Password{Message: "Passphrase for the GPG key:"}
+	if err := survey.AskOne(passPrompt, &passphrase); err != nil {
+		return fmt.Errorf("github: passphrase prompt: %w", err)
+	}
+	if passphrase == "" {
+		return fmt.Errorf("github: passphrase is required (cannot be empty)")
+	}
+
+	// 7. Export the private key (in-memory only, never on disk).
+	privArmor, err := gpg.ExportPrivateKey(keyID, passphrase)
+	if err != nil {
+		return fmt.Errorf("github: export private key: %w", err)
+	}
+
+	// Track per-step success so a late failure can report what
+	// already succeeded.
+	var (
+		didUploadPubkey bool
+		didSetSecrets   bool
+		didOpenPR       bool
+		uploadedFP      string
+		prURL           string
+	)
+
+	// 8. Upload the public key to GitHub. If a key with the same
+	// fingerprint is already present, the upload is skipped and the
+	// existing fingerprint is returned.
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "==> Uploading public key to GitHub...")
+	uploadedFP, err = github.UploadPublicKeyWithFingerprint(token, pubArmor, fingerprint)
+	if err != nil {
+		// Report what we have so far and stop — the user needs to
+		// fix the upload before secrets/PR can proceed (the PR
+		// commits the same key; secrets need the private key which
+		// we already have, but a half-state is worse than a clean
+		// stop with a diagnostic).
+		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
+			didSetSecrets, didOpenPR, prURL)
+		return fmt.Errorf("github: upload public key: %w", err)
+	}
+	didUploadPubkey = true
+	fmt.Fprintf(out, "    Public key uploaded (fingerprint: %s)\n", uploadedFP)
+
+	// 9. Set GPG_PRIVATE_KEY and GPG_PASSPHRASE repo secrets via gh CLI.
+	fmt.Fprintln(out, "==> Setting repo secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE...")
+	if err := github.SetGPGSecrets(token, owner, repo, privArmor, passphrase); err != nil {
+		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
+			didSetSecrets, didOpenPR, prURL)
+		return fmt.Errorf("github: set repo secrets: %w", err)
+	}
+	didSetSecrets = true
+	fmt.Fprintln(out, "    Secrets set: GPG_PRIVATE_KEY, GPG_PASSPHRASE")
+
+	// 10. Commit gpg-public-key.asc and open a PR.
+	fmt.Fprintln(out, "==> Committing gpg-public-key.asc and opening PR...")
+	prURL, err = github.CommitPublicKeyFile(token, owner, repo, pubArmor)
+	if err != nil {
+		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
+			didSetSecrets, didOpenPR, prURL)
+		return fmt.Errorf("github: commit + open PR: %w", err)
+	}
+	didOpenPR = true
+	fmt.Fprintf(out, "    PR opened: %s\n", prURL)
+
+	// Final summary.
+	printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
+		didSetSecrets, didOpenPR, prURL)
+	return nil
+}
+
+// printGithubSummary prints a structured summary of which steps
+// succeeded. It is called both on success and on partial failure so
+// the user always sees the state. Secret values (token, private key,
+// passphrase) are NEVER included — only step status and non-secret
+// outputs (fingerprint, PR URL).
+func printGithubSummary(out io.Writer, owner, repo string,
+	didUploadPubkey bool, fingerprint string,
+	didSetSecrets bool, didOpenPR bool, prURL string) {
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "GitHub setup summary for %s/%s:\n", owner, repo)
+	mark := func(ok bool) string {
+		if ok {
+			return "✅"
+		}
+		return "❌"
+	}
+	fmt.Fprintf(out, "  %s Public key uploaded to GitHub user account", mark(didUploadPubkey))
+	if didUploadPubkey && fingerprint != "" {
+		fmt.Fprintf(out, " (fingerprint: %s)", fingerprint)
+	}
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "  %s Repo secrets set (GPG_PRIVATE_KEY, GPG_PASSPHRASE)\n", mark(didSetSecrets))
+	fmt.Fprintf(out, "  %s PR opened with gpg-public-key.asc", mark(didOpenPR))
+	if didOpenPR && prURL != "" {
+		fmt.Fprintf(out, ": %s", prURL)
+	}
+	fmt.Fprintln(out)
 }
 
 func main() {

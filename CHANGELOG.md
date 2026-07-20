@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- M6: `github` command group — upload pubkey, set repo secrets, commit pubkey file + PR
+
 ## [0.4.0] — 2026-07-20
 
 ### Added
