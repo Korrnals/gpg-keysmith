@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-07-20
+
 ### Added
 - M9: `status` command — read-only inspector with ✅/❌/⚠️ per-step indicators + remediation hints
 - M8: `wizard` command — orchestrates detect→generate→export→git-config→github→publish with per-step confirmation, retry, and resume via state.json
