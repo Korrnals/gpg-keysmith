@@ -7,11 +7,16 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/AlecAivazis/survey/v2"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
 	"github.com/Korrnals/gpg-keysmith/internal/config"
+	"github.com/Korrnals/gpg-keysmith/internal/git"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
+	"github.com/Korrnals/gpg-keysmith/internal/keyserver"
+	"github.com/Korrnals/gpg-keysmith/internal/status"
+	"github.com/Korrnals/gpg-keysmith/internal/wizard"
 )
 
 // --- Test harness helpers ----------------------------------------------
@@ -658,5 +663,383 @@ func TestGeneratePassphraseFilePrecedenceOverPrompt(t *testing.T) {
 	if capturedOpts.Passphrase != "precedence-pass" {
 		t.Errorf("opts.Passphrase = %q, want %q (file wins over prompt)",
 			capturedOpts.Passphrase, "precedence-pass")
+	}
+}
+
+// --- run* happy-path coverage (QA1) -------------------------------------
+//
+// These tests exercise the run* subcommand handlers end-to-end by
+// mocking the hoisted function seams (exportPublicKeyFn,
+// exportPrivateKeyFn, applyGitConfigFn, publishPubKeyFn, runWizardFn,
+// collectStatusFn, uploadPublicKeyWithFingerprintFn, setGPGSecretsFn,
+// commitPublicKeyFileFn, detectExistingKeysFn). Each test wires the
+// flags needed to skip interactive survey prompts, calls runRoot,
+// and asserts the expected stdout output. No real gpg/git/gh/
+// keyserver/HTTP calls are made.
+
+// mockKeyID is a 40-hex-char key id used by the detect mocks so the
+// hex validation in gpg.ValidateKeyID / git.validateHexKeyID passes.
+const mockKeyID = "ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+const mockKeyIDShort = "MOCKKEYID1234567890"
+const mockArmorPub = "-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCK\n-----END PGP PUBLIC KEY BLOCK-----"
+const mockArmorPriv = "-----BEGIN PGP PRIVATE KEY BLOCK-----\nMOCK\n-----END PGP PRIVATE KEY BLOCK-----"
+
+// mockDetectKeys returns a detect mock that yields one key with the
+// short key id (for selection prompts) and the full fingerprint (for
+// the fingerprint lookup). Used by export/publish/github/git-config
+// happy-path tests.
+func mockDetectKeys() ([]gpg.GpgKey, error) {
+	return []gpg.GpgKey{{
+		KeyID:       mockKeyIDShort,
+		Fingerprint: mockKeyID,
+		UserId:      "Test <t@e.com>",
+	}}, nil
+}
+
+// TestRunGenerate_HappyPath verifies runGenerate produces the success
+// output when --name, --email, and --passphrase-file are all provided
+// and generateKeyFn returns a mocked key id. No survey prompts fire
+// (all required fields come from flags + the passphrase file).
+func TestRunGenerate_HappyPath(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+
+	savedGen := generateKeyFn
+	t.Cleanup(func() { generateKeyFn = savedGen })
+	generateKeyFn = func(opts gpg.GenerateOptions) (string, error) {
+		if opts.Name != "Test User" {
+			t.Errorf("opts.Name = %q, want %q", opts.Name, "Test User")
+		}
+		if opts.Email != "test@example.com" {
+			t.Errorf("opts.Email = %q, want %q", opts.Email, "test@example.com")
+		}
+		return mockKeyIDShort, nil
+	}
+
+	path := writePassphraseFile(t, "testpass\n")
+	out, _, err := runRoot(t, "generate",
+		"--name", "Test User",
+		"--email", "test@example.com",
+		"--passphrase-file", path,
+	)
+	if err != nil {
+		t.Fatalf("generate returned error: %v", err)
+	}
+	wantGen := "Generated new GPG key: " + mockKeyIDShort
+	if !strings.Contains(out, wantGen) {
+		t.Errorf("generate output should contain %q:\n%s", wantGen, out)
+	}
+	if !strings.Contains(out, "Run 'keysmith detect' to verify") {
+		t.Errorf("generate output should hint at 'keysmith detect':\n%s", out)
+	}
+}
+
+// TestRunExport_HappyPath verifies runExport writes the armored
+// public key to --pubkey, captures the private key in memory, and
+// prints the "Exported public key" summary. All hoisted gpg seams
+// are mocked; --keyid and --passphrase-file skip the interactive
+// selection and passphrase prompts.
+func TestRunExport_HappyPath(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+
+	savedPub := exportPublicKeyFn
+	t.Cleanup(func() { exportPublicKeyFn = savedPub })
+	exportPublicKeyFn = func(keyID string) (string, error) {
+		if keyID != mockKeyIDShort {
+			t.Errorf("exportPublicKey keyID = %q, want %q", keyID, mockKeyIDShort)
+		}
+		return mockArmorPub, nil
+	}
+
+	savedPriv := exportPrivateKeyFn
+	t.Cleanup(func() { exportPrivateKeyFn = savedPriv })
+	exportPrivateKeyFn = func(keyID, passphrase string) (string, error) {
+		if passphrase != "exportpass" {
+			t.Errorf("exportPrivateKey passphrase = %q, want %q", passphrase, "exportpass")
+		}
+		return mockArmorPriv, nil
+	}
+
+	savedDetect := detectExistingKeysFn
+	t.Cleanup(func() { detectExistingKeysFn = savedDetect })
+	detectExistingKeysFn = mockDetectKeys
+
+	dir := t.TempDir()
+	pubPath := filepath.Join(dir, "pub.asc")
+	passPath := writePassphraseFile(t, "exportpass\n")
+	out, _, err := runRoot(t, "export",
+		"--keyid", mockKeyIDShort,
+		"--pubkey", pubPath,
+		"--passphrase-file", passPath,
+	)
+	if err != nil {
+		t.Fatalf("export returned error: %v", err)
+	}
+	b, rerr := os.ReadFile(pubPath)
+	if rerr != nil {
+		t.Fatalf("pubkey file not written: %v", rerr)
+	}
+	if !strings.Contains(string(b), "BEGIN PGP PUBLIC KEY BLOCK") {
+		t.Errorf("pubkey file should contain the armor header:\n%s", string(b))
+	}
+	if !strings.Contains(out, "Exported public key") {
+		t.Errorf("export output should contain 'Exported public key':\n%s", out)
+	}
+	if !strings.Contains(out, "Key id:") {
+		t.Errorf("export output should list the key id:\n%s", out)
+	}
+	if !strings.Contains(out, mockKeyID) {
+		t.Errorf("export output should contain the fingerprint %s:\n%s", mockKeyID, out)
+	}
+	if !strings.Contains(out, "Private key captured in memory") {
+		t.Errorf("export output should mention private key capture:\n%s", out)
+	}
+}
+
+// TestRunGitConfig_HappyPath verifies runGitConfig calls applyGitConfigFn
+// and prints the six-key signing summary. --keyid, --name, --email
+// are all provided so no survey prompts fire.
+func TestRunGitConfig_HappyPath(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+
+	var capturedOpts git.ConfigOptions
+	savedApply := applyGitConfigFn
+	t.Cleanup(func() { applyGitConfigFn = savedApply })
+	applyGitConfigFn = func(opts git.ConfigOptions) error {
+		capturedOpts = opts
+		return nil
+	}
+
+	out, _, err := runRoot(t, "git-config",
+		"--keyid", mockKeyIDShort,
+		"--name", "Test",
+		"--email", "t@e.com",
+	)
+	if err != nil {
+		t.Fatalf("git-config returned error: %v", err)
+	}
+	if capturedOpts.KeyID != mockKeyIDShort {
+		t.Errorf("opts.KeyID = %q, want %q", capturedOpts.KeyID, mockKeyIDShort)
+	}
+	if capturedOpts.Name != "Test" {
+		t.Errorf("opts.Name = %q, want %q", capturedOpts.Name, "Test")
+	}
+	if !strings.Contains(out, "Git signing configured") {
+		t.Errorf("git-config output should contain 'Git signing configured':\n%s", out)
+	}
+	if !strings.Contains(out, "user.signingkey") {
+		t.Errorf("git-config output should list user.signingkey:\n%s", out)
+	}
+	if !strings.Contains(out, mockKeyIDShort) {
+		t.Errorf("git-config output should contain the key id:\n%s", out)
+	}
+}
+
+// TestRunStatus_HappyPath verifies runStatus prints the five-check
+// table when collectStatusFn returns an all-✅ report. The token env
+// var is set so resolveGitHubToken does not error; collectStatusFn
+// is mocked so no real checks run.
+func TestRunStatus_HappyPath(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+	t.Setenv("GITHUB_TOKEN", "ghp_mocktoken")
+
+	savedCollect := collectStatusFn
+	t.Cleanup(func() { collectStatusFn = savedCollect })
+	collectStatusFn = func(opts status.StatusOptions) status.StatusReport {
+		return status.StatusReport{
+			GpgKeys:      status.CheckResult{Status: status.StatusOK, Detail: "1 key(s) found"},
+			GitConfig:    status.CheckResult{Status: status.StatusOK, Detail: "signing configured"},
+			GitHubPubKey: status.CheckResult{Status: status.StatusOK, Detail: "key uploaded"},
+			RepoSecrets:  status.CheckResult{Status: status.StatusOK, Detail: "secrets set"},
+			Keyserver:    status.CheckResult{Status: status.StatusOK, Detail: "published"},
+		}
+	}
+
+	out, _, err := runRoot(t, "status")
+	if err != nil {
+		t.Fatalf("status returned error: %v", err)
+	}
+	for _, label := range []string{"GPG KEYS", "GIT CONFIG", "GITHUB PUBKEY", "REPO SECRETS", "KEYSERVER"} {
+		if !strings.Contains(out, label) {
+			t.Errorf("status output should contain %q:\n%s", label, out)
+		}
+	}
+	if strings.Count(out, "✅") < 5 {
+		t.Errorf("status output should contain 5 ✅ marks:\n%s", out)
+	}
+}
+
+// TestRunPublish_HappyPath verifies runPublish prints per-keyserver
+// ✅ results and the keyserver names when publishPubKeyFn returns
+// two successful results. --keyid skips the interactive selection;
+// exportPublicKeyFn supplies the armor.
+func TestRunPublish_HappyPath(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+
+	savedPub := publishPubKeyFn
+	t.Cleanup(func() { publishPubKeyFn = savedPub })
+	publishPubKeyFn = func(opts keyserver.PublishOptions) ([]keyserver.PublishResult, error) {
+		return []keyserver.PublishResult{
+			{Keyserver: "keys.openpgp.org", Success: true, URL: "https://example.com/openpgp"},
+			{Keyserver: "keyserver.ubuntu.com", Success: true, URL: "https://example.com/ubuntu"},
+		}, nil
+	}
+
+	savedExport := exportPublicKeyFn
+	t.Cleanup(func() { exportPublicKeyFn = savedExport })
+	exportPublicKeyFn = func(keyID string) (string, error) {
+		return mockArmorPub, nil
+	}
+
+	savedDetect := detectExistingKeysFn
+	t.Cleanup(func() { detectExistingKeysFn = savedDetect })
+	detectExistingKeysFn = mockDetectKeys
+
+	out, _, err := runRoot(t, "publish",
+		"--keyid", mockKeyIDShort,
+	)
+	if err != nil {
+		t.Fatalf("publish returned error: %v", err)
+	}
+	if !strings.Contains(out, "keys.openpgp.org") {
+		t.Errorf("publish output should mention keys.openpgp.org:\n%s", out)
+	}
+	if !strings.Contains(out, "keyserver.ubuntu.com") {
+		t.Errorf("publish output should mention keyserver.ubuntu.com:\n%s", out)
+	}
+	if strings.Count(out, "✅") < 2 {
+		t.Errorf("publish output should contain 2 ✅ marks:\n%s", out)
+	}
+}
+
+// TestRunWizard_HappyPath verifies runWizard delegates to runWizardFn
+// with the flag-derived options and prints the start banner. --state-path
+// is set to a temp file so the wizard does not touch the user's real
+// state location; --passphrase-file skips the in-wizard passphrase
+// prompts; runWizardFn is mocked so no real steps run.
+func TestRunWizard_HappyPath(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+
+	var capturedOpts wizard.WizardOptions
+	savedRun := runWizardFn
+	t.Cleanup(func() { runWizardFn = savedRun })
+	runWizardFn = func(opts wizard.WizardOptions) error {
+		capturedOpts = opts
+		return nil
+	}
+
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	passPath := writePassphraseFile(t, "wizardpass\n")
+	out, _, err := runRoot(t, "wizard",
+		"--name", "Test",
+		"--email", "t@e.com",
+		"--repo", "owner/name",
+		"--state-path", statePath,
+		"--passphrase-file", passPath,
+	)
+	if err != nil {
+		t.Fatalf("wizard returned error: %v", err)
+	}
+	if capturedOpts.Name != "Test" {
+		t.Errorf("opts.Name = %q, want %q", capturedOpts.Name, "Test")
+	}
+	if capturedOpts.Email != "t@e.com" {
+		t.Errorf("opts.Email = %q, want %q", capturedOpts.Email, "t@e.com")
+	}
+	if capturedOpts.Repo != "owner/name" {
+		t.Errorf("opts.Repo = %q, want %q", capturedOpts.Repo, "owner/name")
+	}
+	if capturedOpts.Passphrase != "wizardpass" {
+		t.Errorf("opts.Passphrase = %q, want %q", capturedOpts.Passphrase, "wizardpass")
+	}
+	if capturedOpts.StatePath != statePath {
+		t.Errorf("opts.StatePath = %q, want %q", capturedOpts.StatePath, statePath)
+	}
+	if !strings.Contains(out, "Starting gpg-keysmith wizard") {
+		t.Errorf("wizard output should contain the start banner:\n%s", out)
+	}
+}
+
+// TestRunGithub_HappyPath verifies runGithub performs the full upload
+// → set-secrets → open-PR flow when all hoisted github seams are mocked.
+// --pubkey-file is used so exportPublicKeyFn is not called for the
+// public key. surveyAskOneFn is mocked to supply the passphrase (the
+// github command has no --passphrase-file flag), and exportPrivateKeyFn
+// supplies the in-memory private key. GITHUB_TOKEN is set via t.Setenv.
+func TestRunGithub_HappyPath(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+	t.Setenv("GITHUB_TOKEN", "ghp_mocktoken")
+
+	savedUpload := uploadPublicKeyWithFingerprintFn
+	t.Cleanup(func() { uploadPublicKeyWithFingerprintFn = savedUpload })
+	uploadPublicKeyWithFingerprintFn = func(token, armoredPubKey, fingerprint string) (string, error) {
+		if token != "ghp_mocktoken" {
+			t.Errorf("upload token = %q, want ghp_mocktoken", token)
+		}
+		return mockKeyID, nil
+	}
+
+	savedSecrets := setGPGSecretsFn
+	t.Cleanup(func() { setGPGSecretsFn = savedSecrets })
+	setGPGSecretsFn = func(token, owner, repo, privateKey, passphrase string) error {
+		if owner != "owner" || repo != "name" {
+			t.Errorf("setGPGSecrets owner/repo = %q/%q, want owner/name", owner, repo)
+		}
+		if passphrase != "ghpass" {
+			t.Errorf("setGPGSecrets passphrase = %q, want ghpass", passphrase)
+		}
+		return nil
+	}
+
+	savedCommit := commitPublicKeyFileFn
+	t.Cleanup(func() { commitPublicKeyFileFn = savedCommit })
+	commitPublicKeyFileFn = func(token, owner, repo, armoredPubKey string) (string, error) {
+		return "https://github.com/owner/name/pull/1", nil
+	}
+
+	savedPriv := exportPrivateKeyFn
+	t.Cleanup(func() { exportPrivateKeyFn = savedPriv })
+	exportPrivateKeyFn = func(keyID, passphrase string) (string, error) {
+		return mockArmorPriv, nil
+	}
+
+	savedDetect := detectExistingKeysFn
+	t.Cleanup(func() { detectExistingKeysFn = savedDetect })
+	detectExistingKeysFn = mockDetectKeys
+
+	savedSurvey := surveyAskOneFn
+	t.Cleanup(func() { surveyAskOneFn = savedSurvey })
+	surveyAskOneFn = func(p survey.Prompt, response interface{}, opts ...survey.AskOpt) error {
+		// runGithub prompts for the passphrase via *survey.Password.
+		// Set the response string to the test passphrase.
+		switch resp := response.(type) {
+		case *string:
+			*resp = "ghpass"
+		default:
+			t.Errorf("unexpected survey response type %T for prompt %T", response, p)
+		}
+		return nil
+	}
+
+	pubPath := filepath.Join(t.TempDir(), "pub.asc")
+	if err := os.WriteFile(pubPath, []byte(mockArmorPub), 0o644); err != nil {
+		t.Fatalf("write pubkey file: %v", err)
+	}
+
+	out, _, err := runRoot(t, "github",
+		"--repo", "owner/name",
+		"--keyid", mockKeyIDShort,
+		"--pubkey-file", pubPath,
+	)
+	if err != nil {
+		t.Fatalf("github returned error: %v", err)
+	}
+	if !strings.Contains(out, "Public key uploaded") {
+		t.Errorf("github output should mention 'Public key uploaded':\n%s", out)
+	}
+	if !strings.Contains(out, "Secrets set") {
+		t.Errorf("github output should mention 'Secrets set':\n%s", out)
+	}
+	if !strings.Contains(out, "https://github.com/owner/name/pull/1") {
+		t.Errorf("github output should contain the PR URL:\n%s", out)
 	}
 }
