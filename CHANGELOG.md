@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- M7: `publish` command — upload public key to keys.openpgp.org + keyserver.ubuntu.com
+
 ## [0.5.0] — 2026-07-20
 
 ### Added

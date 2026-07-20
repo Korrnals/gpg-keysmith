@@ -18,6 +18,7 @@ import (
 	"github.com/Korrnals/gpg-keysmith/internal/git"
 	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
+	"github.com/Korrnals/gpg-keysmith/internal/keyserver"
 	"github.com/spf13/cobra"
 )
 
@@ -160,12 +161,28 @@ var (
 
 var publishCmd = &cobra.Command{
 	Use:   "publish",
-	Short: "Publish public key to a keyserver (stub)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintln(cmd.OutOrStdout(), "publish: not implemented yet")
-		return nil
-	},
+	Short: "Publish public key to a keyserver (keys.openpgp.org + keyserver.ubuntu.com)",
+	Long: `Publish the GPG public key to a public keyserver via HTTPS submit endpoints.
+
+Default keyserver is 'all' (publishes to both keys.openpgp.org and
+keyserver.ubuntu.com). Use --keyserver=openpgp for just the first, or
+--keyserver=ubuntu for just the second.
+
+If --keyid is empty, the key is picked interactively from
+'gpg --list-secret-keys'. If --pubkey-file is set, the armored public
+key is read from that file instead of calling gpg --export.
+
+On success, prints the verification URL for each keyserver.`,
+	Args: cobra.NoArgs,
+	RunE: runPublish,
 }
+
+// publish command flags.
+var (
+	pubKeyID      string
+	pubKeyserver  string
+	pubPubkeyFile string
+)
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
@@ -211,7 +228,9 @@ func init() {
 	gitConfigCmd.Flags().StringVar(&gcName, "name", "", "real name to set as user.name (if empty, keep existing)")
 	gitConfigCmd.Flags().StringVar(&gcEmail, "email", "", "email to set as user.email (if empty, keep existing)")
 	gitConfigCmd.Flags().BoolVar(&gcGlobal, "global", false, "write to the global user config instead of the local repo config")
-
+	publishCmd.Flags().StringVar(&pubKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
+	publishCmd.Flags().StringVar(&pubKeyserver, "keyserver", "all", "keyserver target: all (default), openpgp, or ubuntu")
+	publishCmd.Flags().StringVar(&pubPubkeyFile, "pubkey-file", "", "read armored public key from this file instead of calling gpg --export")
 	githubCmd.Flags().StringVar(&ghRepo, "repo", "", "target repo as owner/name (required)")
 	githubCmd.Flags().StringVar(&ghToken, "token", "", "GitHub PAT (if empty, read GITHUB_TOKEN or GH_TOKEN env var)")
 	githubCmd.Flags().StringVar(&ghKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
@@ -742,6 +761,140 @@ func printGithubSummary(out io.Writer, owner, repo string,
 		fmt.Fprintf(out, ": %s", prURL)
 	}
 	fmt.Fprintln(out)
+}
+
+// runPublish implements the 'publish' subcommand. It:
+//  1. Resolves the GPG key id (--keyid > interactive pick from detect).
+//  2. Obtains the armored public key (--pubkey-file > gpg.ExportPublicKey).
+//  3. Looks up the fingerprint from detect (used to build the URL).
+//  4. Normalises --keyserver (all/openpgp/ubuntu) to the canonical
+//     keyserver name(s) accepted by keyserver.PublishPubKey.
+//  5. Calls keyserver.PublishPubKey and prints per-keyserver results
+//     (✅/❌ + URL).
+//
+// If any individual keyserver fails, the command prints the failure
+// for that keyserver but continues to the next one; the overall
+// command exits non-zero only if no keyserver accepted the upload.
+func runPublish(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+
+	// 1. Resolve the key id. --keyid > interactive pick from detect.
+	keyID := pubKeyID
+	if keyID == "" {
+		keys, err := gpg.DetectExistingKeys()
+		if err != nil {
+			return fmt.Errorf("publish: detect existing GPG keys: %w", err)
+		}
+		if len(keys) == 0 {
+			return fmt.Errorf("publish: no GPG keys found; run 'keysmith generate' first")
+		}
+		options := make([]string, 0, len(keys))
+		for _, k := range keys {
+			options = append(options, fmt.Sprintf("%s  %s", k.KeyID, k.UserId))
+		}
+		var choice string
+		prompt := &survey.Select{
+			Message: "Select a GPG key to publish:",
+			Options: options,
+		}
+		if err := survey.AskOne(prompt, &choice); err != nil {
+			return fmt.Errorf("publish: key selection: %w", err)
+		}
+		if i := strings.IndexByte(choice, ' '); i > 0 {
+			keyID = choice[:i]
+		} else {
+			keyID = choice
+		}
+	}
+
+	// 2. Obtain the armored public key. --pubkey-file > gpg export.
+	var pubArmor string
+	if pubPubkeyFile != "" {
+		b, err := os.ReadFile(pubPubkeyFile)
+		if err != nil {
+			return fmt.Errorf("publish: read pubkey file %s: %w", pubPubkeyFile, err)
+		}
+		pubArmor = string(b)
+	} else {
+		a, err := gpg.ExportPublicKey(keyID)
+		if err != nil {
+			return fmt.Errorf("publish: export public key: %w", err)
+		}
+		pubArmor = a
+	}
+
+	// 3. Look up the fingerprint from detect (used to build the URL).
+	fingerprint := ""
+	if keys, err := gpg.DetectExistingKeys(); err == nil {
+		for _, k := range keys {
+			if k.KeyID == keyID {
+				fingerprint = k.Fingerprint
+				break
+			}
+		}
+	}
+
+	// 4. Normalise --keyserver (all/openpgp/ubuntu) to the canonical
+	//    keyserver name accepted by keyserver.PublishPubKey.
+	ks, err := normaliseKeyserverFlag(pubKeyserver)
+	if err != nil {
+		return fmt.Errorf("publish: %w", err)
+	}
+
+	// 5. Publish.
+	fmt.Fprintf(out, "Publishing public key %s to %s...\n", keyID, ks)
+	results, err := keyserver.PublishPubKey(keyserver.PublishOptions{
+		ArmoredPubKey: pubArmor,
+		Keyserver:     ks,
+		Fingerprint:   fingerprint,
+	})
+	if err != nil {
+		return fmt.Errorf("publish: %w", err)
+	}
+
+	// Print per-keyserver results. A per-keyserver failure is shown
+	// but does not abort the loop — we want the user to see the state
+	// of every keyserver we contacted.
+	fmt.Fprintln(out)
+	anySuccess := false
+	for _, r := range results {
+		mark := "❌"
+		if r.Success {
+			mark = "✅"
+			anySuccess = true
+		}
+		fmt.Fprintf(out, "  %s %s", mark, r.Keyserver)
+		if r.URL != "" {
+			fmt.Fprintf(out, " — %s", r.URL)
+		}
+		if r.Err != nil {
+			fmt.Fprintf(out, "\n      %v", r.Err)
+		}
+		fmt.Fprintln(out)
+	}
+
+	if !anySuccess {
+		return fmt.Errorf("publish: no keyserver accepted the upload")
+	}
+	return nil
+}
+
+// normaliseKeyserverFlag maps the CLI-friendly --keyserver values
+// (all/openpgp/ubuntu) to the canonical keyserver name(s) accepted by
+// keyserver.PublishPubKey. The canonical names
+// ("keys.openpgp.org", "keyserver.ubuntu.com", "all") are also
+// accepted verbatim.
+func normaliseKeyserverFlag(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "all":
+		return keyserver.KeyserverAll, nil
+	case "openpgp", keyserver.KeyserverOpenPGP:
+		return keyserver.KeyserverOpenPGP, nil
+	case "ubuntu", keyserver.KeyserverUbuntu:
+		return keyserver.KeyserverUbuntu, nil
+	default:
+		return "", fmt.Errorf("invalid --keyserver %q (want all, openpgp, or ubuntu)", s)
+	}
 }
 
 func main() {
