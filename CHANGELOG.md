@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `--passphrase-file` flag for `generate`/`export`/`wizard` (non-interactive CI/script usage; reads passphrase from file to avoid TTY/survey block; file perms warn if looser than 0600)
+
 ## [1.0.1] — 2026-07-20
 
 ## [1.0.0] — 2026-07-20

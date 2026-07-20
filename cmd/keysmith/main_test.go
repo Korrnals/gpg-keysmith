@@ -33,8 +33,10 @@ func resetGlobalFlags(t *testing.T) {
 	genName, genEmail, genComment = "", "", ""
 	genKeyLength = 4096
 	genExpiry = "0"
+	genPassphraseFile = ""
 	// export flags
 	expKeyID, expEmail, expPubkey = "", "", "gpg-public-key.asc"
+	expPassphraseFile = ""
 	// git-config flags
 	gcKeyID, gcName, gcEmail = "", "", ""
 	gcGlobal = false
@@ -49,6 +51,7 @@ func resetGlobalFlags(t *testing.T) {
 	wzKeyLength = 4096
 	wzExpiry, wzKeyserver, wzStatePath = "0", "all", ""
 	wzReset = false
+	wzPassphraseFile = ""
 	// config init flag
 	configInitForce = false
 
@@ -255,7 +258,7 @@ func TestGenerateCommandRegistered(t *testing.T) {
 	if gen == nil {
 		t.Fatal("generate subcommand not registered on rootCmd")
 	}
-	for _, name := range []string{"name", "email", "comment", "key-length", "expiry"} {
+	for _, name := range []string{"name", "email", "comment", "key-length", "expiry", "passphrase-file"} {
 		if gen.Flags().Lookup(name) == nil {
 			t.Errorf("generate subcommand missing flag %q", name)
 		}
@@ -460,4 +463,200 @@ func findSubCommand(root *cobra.Command, name string) *cobra.Command {
 		}
 	}
 	return nil
+}
+
+// --- --passphrase-file flag wiring tests --------------------------------
+//
+// These tests verify the --passphrase-file flag is registered on
+// generate, export, and wizard, and that runGenerate reads the
+// passphrase from the file and SKIPS the survey.Password prompt when
+// the flag is set. The gpg.GenerateKey call is mocked via the
+// generateKeyFn function-variable seam so no real gpg runs and no TTY
+// is needed.
+
+// TestExportPassphraseFileFlagRegistered verifies the export subcommand
+// has the --passphrase-file flag wired.
+func TestExportPassphraseFileFlagRegistered(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+	exp := findSubCommand(rootCmd, "export")
+	if exp == nil {
+		t.Fatal("export subcommand not registered on rootCmd")
+	}
+	if exp.Flags().Lookup("passphrase-file") == nil {
+		t.Error("export subcommand missing flag 'passphrase-file'")
+	}
+}
+
+// TestWizardPassphraseFileFlagRegistered verifies the wizard subcommand
+// has the --passphrase-file flag wired.
+func TestWizardPassphraseFileFlagRegistered(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+	wz := findSubCommand(rootCmd, "wizard")
+	if wz == nil {
+		t.Fatal("wizard subcommand not registered on rootCmd")
+	}
+	if wz.Flags().Lookup("passphrase-file") == nil {
+		t.Error("wizard subcommand missing flag 'passphrase-file'")
+	}
+}
+
+// writePassphraseFile writes content to a file in t.TempDir() with
+// 0600 perms and returns its path. The passphrase content is NOT
+// logged to test output.
+func writePassphraseFile(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "passphrase.txt")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write passphrase file: %v", err)
+	}
+	return path
+}
+
+// TestGeneratePassphraseFilePopulatesOpts verifies runGenerate reads
+// the passphrase from --passphrase-file and SKIPS the survey.Password
+// prompt entirely. The gpg.GenerateKey call is mocked via the
+// generateKeyFn seam; the mock captures opts.Passphrase so we can
+// assert the file content reached gpg without being prompted.
+//
+// This is the function-variable-injection approach the task asked
+// about: runGenerate is testable end-to-end (flag parsing → passphrase
+// resolution → gpg call) without a real TTY and without real gpg.
+func TestGeneratePassphraseFilePopulatesOpts(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+
+	// Mock gpg.GenerateKey so no real gpg runs. Capture the opts the
+	// mock received so we can assert opts.Passphrase came from the
+	// file (not from a survey prompt, which would block in a non-TTY
+	// test harness).
+	var capturedOpts gpg.GenerateOptions
+	savedGen := generateKeyFn
+	t.Cleanup(func() { generateKeyFn = savedGen })
+	generateKeyFn = func(opts gpg.GenerateOptions) (string, error) {
+		capturedOpts = opts
+		return "MOCKKEYID12345678", nil
+	}
+
+	path := writePassphraseFile(t, "file-passphrase\n")
+	out, _, err := runRoot(t, "generate",
+		"--name", "Test User",
+		"--email", "user@example.com",
+		"--passphrase-file", path,
+	)
+	if err != nil {
+		t.Fatalf("generate --passphrase-file returned error: %v", err)
+	}
+	// The passphrase must come from the file (trailing newline
+	// stripped), not from a survey prompt. If the survey path had
+	// fired, the test would have hung on the masked prompt and
+	// timed out — the fact that we got here proves the prompt was
+	// skipped.
+	if capturedOpts.Passphrase != "file-passphrase" {
+		t.Errorf("opts.Passphrase = %q, want %q (from file, newline stripped)",
+			capturedOpts.Passphrase, "file-passphrase")
+	}
+	if capturedOpts.Name != "Test User" {
+		t.Errorf("opts.Name = %q, want %q", capturedOpts.Name, "Test User")
+	}
+	if capturedOpts.Email != "user@example.com" {
+		t.Errorf("opts.Email = %q, want %q", capturedOpts.Email, "user@example.com")
+	}
+	if !strings.Contains(out, "MOCKKEYID12345678") {
+		t.Errorf("generate output should contain the mocked key id:\n%s", out)
+	}
+}
+
+// TestGeneratePassphraseFileMissing verifies runGenerate returns a
+// clear error (and does NOT fall back to the survey prompt) when
+// --passphrase-file points at a missing file. This guards against
+// silently prompting in CI when the file path is wrong.
+func TestGeneratePassphraseFileMissing(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+
+	// Mock gpg.GenerateKey so the test fails loudly if runGenerate
+	// somehow reaches gpg despite the missing-file error.
+	savedGen := generateKeyFn
+	t.Cleanup(func() { generateKeyFn = savedGen })
+	generateKeyFn = func(opts gpg.GenerateOptions) (string, error) {
+		t.Fatalf("gpg.GenerateKey should not be called when --passphrase-file is missing")
+		return "", nil
+	}
+
+	missing := filepath.Join(t.TempDir(), "no-such-file.txt")
+	_, _, err := runRoot(t, "generate",
+		"--name", "Test User",
+		"--email", "user@example.com",
+		"--passphrase-file", missing,
+	)
+	if err == nil {
+		t.Fatal("generate --passphrase-file with missing file should return an error")
+	}
+	if !strings.Contains(err.Error(), "cannot read passphrase file") {
+		t.Errorf("error should mention 'cannot read passphrase file', got: %v", err)
+	}
+}
+
+// TestGeneratePassphraseFileEmpty verifies runGenerate returns a
+// clear error when --passphrase-file points at an empty file. An
+// empty passphrase would create an unprotected key — never allowed.
+func TestGeneratePassphraseFileEmpty(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+
+	savedGen := generateKeyFn
+	t.Cleanup(func() { generateKeyFn = savedGen })
+	generateKeyFn = func(opts gpg.GenerateOptions) (string, error) {
+		t.Fatalf("gpg.GenerateKey should not be called when --passphrase-file is empty")
+		return "", nil
+	}
+
+	path := writePassphraseFile(t, "\n")
+	_, _, err := runRoot(t, "generate",
+		"--name", "Test User",
+		"--email", "user@example.com",
+		"--passphrase-file", path,
+	)
+	if err == nil {
+		t.Fatal("generate --passphrase-file with empty file should return an error")
+	}
+	if !strings.Contains(err.Error(), "is empty") {
+		t.Errorf("error should mention 'is empty', got: %v", err)
+	}
+}
+
+// TestGeneratePassphraseFilePrecedenceOverPrompt documents and guards
+// the precedence rule: when --passphrase-file is set, the survey
+// prompt is SKIPPED entirely. This test runs runGenerate with the
+// flag set but WITHOUT mocking survey — if the precedence were
+// broken, survey.AskOne would block on a non-TTY and the test would
+// hang or fail with a survey error. The generateKeyFn mock ensures
+// no real gpg call. The assertion is implicit: the test reaches the
+// mock (capturedOpts is populated) which proves the prompt was
+// skipped.
+func TestGeneratePassphraseFilePrecedenceOverPrompt(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+
+	var capturedOpts gpg.GenerateOptions
+	savedGen := generateKeyFn
+	t.Cleanup(func() { generateKeyFn = savedGen })
+	generateKeyFn = func(opts gpg.GenerateOptions) (string, error) {
+		capturedOpts = opts
+		return "MOCKKEYID87654321", nil
+	}
+
+	path := writePassphraseFile(t, "precedence-pass\n")
+	_, _, err := runRoot(t, "generate",
+		"--name", "Precedence User",
+		"--email", "prec@example.com",
+		"--passphrase-file", path,
+	)
+	if err != nil {
+		t.Fatalf("generate returned error: %v", err)
+	}
+	// If the survey prompt had fired instead of the file path, the
+	// test would have blocked (non-TTY) or returned a survey error.
+	// Reaching this assertion proves the file path won.
+	if capturedOpts.Passphrase != "precedence-pass" {
+		t.Errorf("opts.Passphrase = %q, want %q (file wins over prompt)",
+			capturedOpts.Passphrase, "precedence-pass")
+	}
 }
