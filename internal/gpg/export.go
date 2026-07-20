@@ -149,3 +149,31 @@ func buildExportPrivateKeyArgs(keyID string) []string {
 		"--passphrase-fd", "0",
 	}
 }
+
+// ExtractFingerprintFromArmorFile reads an ASCII-armored public key file
+// and returns the key's fingerprint by shelling out to
+// `gpg --with-colons --show-keys <path>`. The first `fpr:` record in the
+// colon output is the primary key fingerprint.
+//
+// This is used by the 'publish' subcommand to validate that the keyid
+// the user passed via --keyid actually matches the key in the --pubkey-file
+// they provided — without this check, a mismatched keyid would silently
+// publish the wrong key under a misleading keyid label.
+func ExtractFingerprintFromArmorFile(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("gpg: extract fingerprint: path is required")
+	}
+	cmd := exec.Command("gpg", "--with-colons", "--show-keys", path)
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("gpg: extract fingerprint from %s: %w", path, err)
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		fields := strings.Split(line, ":")
+		if len(fields) >= 10 && fields[0] == "fpr" {
+			return fields[9], nil
+		}
+	}
+	return "", fmt.Errorf("gpg: no fingerprint found in %s (not a valid armored public key?)", path)
+}

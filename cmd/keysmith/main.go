@@ -1102,6 +1102,27 @@ func runPublish(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("publish: read pubkey file %s: %w", pubPubkeyFile, err)
 		}
 		pubArmor = string(b)
+
+		// Validate that the --keyid matches the fingerprint in the
+		// pubkey file. Without this, a mismatched --keyid would
+		// silently publish the wrong key under a misleading keyid
+		// label and report success (e2e bug B1).
+		if keyID != "" {
+			fileFp, err := gpg.ExtractFingerprintFromArmorFile(pubPubkeyFile)
+			if err != nil {
+				return fmt.Errorf("publish: validate pubkey file: %w", err)
+			}
+			if keys, derr := gpg.DetectExistingKeys(); derr == nil {
+				for _, k := range keys {
+					if k.KeyID == keyID {
+						if k.Fingerprint != "" && !strings.EqualFold(k.Fingerprint, fileFp) {
+							return fmt.Errorf("publish: --keyid %s (fingerprint %s) does not match the fingerprint in --pubkey-file %s (got %s); refusing to publish a key under a mismatched keyid", keyID, k.Fingerprint, pubPubkeyFile, fileFp)
+						}
+						break
+					}
+				}
+			}
+		}
 	} else {
 		a, err := gpg.ExportPublicKey(keyID)
 		if err != nil {
