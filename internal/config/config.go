@@ -133,7 +133,7 @@ func Save(c Config, path string) error {
 	if path == "" {
 		p, err := DefaultPath()
 		if err != nil {
-			return err
+			return fmt.Errorf("config: resolve default path: %w", err)
 		}
 		path = p
 	}
@@ -168,7 +168,7 @@ func Init(path string, force bool) error {
 	if path == "" {
 		p, err := DefaultPath()
 		if err != nil {
-			return err
+			return fmt.Errorf("config: resolve default path: %w", err)
 		}
 		path = p
 	}

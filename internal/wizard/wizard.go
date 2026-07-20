@@ -649,13 +649,13 @@ func RunWizard(opts WizardOptions) error {
 	if statePath == "" {
 		p, err := DefaultStatePath()
 		if err != nil {
-			return err
+			return fmt.Errorf("wizard: resolve state path: %w", err)
 		}
 		statePath = p
 	}
 	state, err := LoadState(statePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("wizard: load state: %w", err)
 	}
 	return runWizardWithState(state, opts)
 }
@@ -692,7 +692,7 @@ func runWizardWithState(state *WizardState, opts WizardOptions) error {
 				// print "done". Continue to the next step.
 				continue
 			}
-			return err
+			return fmt.Errorf("wizard: step %s: %w", name, err)
 		}
 
 		// On success, record and persist.

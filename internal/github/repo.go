@@ -348,11 +348,11 @@ func createCommit(token, owner, repo, message, treeSHA string, parents []string,
 	}
 	path, err := reposPath(owner, repo, "/git/commits")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("github: create commit: build path: %w", err)
 	}
 	req, err := newGitHubRequest(http.MethodPost, path, token, bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("github: create commit: build request: %w", err)
 	}
 	resp, err := c.Do(req)
 	if err != nil {
@@ -388,11 +388,11 @@ func upsertBranchRef(token, owner, repo, branch, commitSHA string, c Doer) error
 	// previous run.
 	patchPath, err := reposPath(owner, repo, "/git/refs/heads/"+branch)
 	if err != nil {
-		return err
+		return fmt.Errorf("github: upsert branch ref (PATCH): build path: %w", err)
 	}
 	patchReq, err := newGitHubRequest(http.MethodPatch, patchPath, token, bytes.NewReader(patchBody))
 	if err != nil {
-		return err
+		return fmt.Errorf("github: upsert branch ref (PATCH): build request: %w", err)
 	}
 	patchResp, err := c.Do(patchReq)
 	if err != nil {
@@ -414,11 +414,11 @@ func upsertBranchRef(token, owner, repo, branch, commitSHA string, c Doer) error
 	}{Ref: "refs/heads/" + branch, SHA: commitSHA})
 	postPath, err := reposPath(owner, repo, "/git/refs")
 	if err != nil {
-		return err
+		return fmt.Errorf("github: upsert branch ref (POST): build path: %w", err)
 	}
 	postReq, err := newGitHubRequest(http.MethodPost, postPath, token, bytes.NewReader(postBody))
 	if err != nil {
-		return err
+		return fmt.Errorf("github: upsert branch ref (POST): build request: %w", err)
 	}
 	postResp, err := c.Do(postReq)
 	if err != nil {
