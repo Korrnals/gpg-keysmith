@@ -4,7 +4,9 @@
   <img src="../assets/banner.svg" alt="gpg-keysmith banner" width="100%"/>
 </p>
 
-[![Version](https://img.shields.io/badge/version-0.7.0-0f766e.svg)](../../VERSION) [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](../../LICENSE) [![Go](https://img.shields.io/badge/Go-1.22%2B-00add8.svg)](https://go.dev) [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](./installation.md)
+[![English](https://img.shields.io/badge/lang-English-blue.svg)](./README.md) [![Русский](https://img.shields.io/badge/lang-Русский-red.svg)](../ru/README.md)
+
+[![Version](https://img.shields.io/badge/version-1.0.0-0f766e.svg)](../../VERSION) [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](../../LICENSE) [![Go](https://img.shields.io/badge/Go-1.22%2B-00add8.svg)](https://go.dev) [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](./installation.md)
 
 `gpg-keysmith` is a Go CLI that automates the full path from "no GPG key" to "signed commits flowing on GitHub". A single `keysmith wizard` invocation walks a developer through every step: generate a GPG key, export the public key, configure `git` to sign commits and tags, upload the public key to GitHub, store the private key as a repository Action secret for CI signing, and publish the public key to a keyserver.
 

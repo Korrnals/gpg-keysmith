@@ -4,7 +4,9 @@
   <img src="../assets/banner.svg" alt="баннер gpg-keysmith" width="100%"/>
 </p>
 
-[![Версия](https://img.shields.io/badge/version-0.7.0-0f766e.svg)](../../VERSION) [![Лицензия: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](../../LICENSE) [![Go](https://img.shields.io/badge/Go-1.22%2B-00add8.svg)](https://go.dev) [![Платформы](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](./installation.md)
+[![English](https://img.shields.io/badge/lang-English-blue.svg)](../en/README.md) [![Русский](https://img.shields.io/badge/lang-Русский-red.svg)](./README.md)
+
+[![Версия](https://img.shields.io/badge/version-1.0.0-0f766e.svg)](../../VERSION) [![Лицензия: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](../../LICENSE) [![Go](https://img.shields.io/badge/Go-1.22%2B-00add8.svg)](https://go.dev) [![Платформы](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](./installation.md)
 
 `gpg-keysmith` — консольная утилита на Go, которая автоматизирует весь путь от «нет GPG-ключа» до «подписанные коммиты в GitHub». Одна команда `keysmith wizard` проводит разработчика по всем шагам: сгенерировать GPG-ключ, экспортировать публичный ключ, настроить `git` на подпись коммитов и тегов, загрузить публичный ключ в GitHub, сохранить приватный ключ как секрет репозитория для подписи в CI и опубликовать публичный ключ на сервере ключей.
 
