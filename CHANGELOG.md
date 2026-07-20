@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- M8: `wizard` command — orchestrates detect→generate→export→git-config→github→publish with per-step confirmation, retry, and resume via state.json
+
 ## [0.6.0] — 2026-07-20
 
 ### Added
