@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-20
+
 ### Added
 - M5: `git-config` command — sets `user.name`, `user.email`, `user.signingkey`, `commit.gpgsign=true`, `gpg.format=openpgp`, `tag.gpgsign=true` in local repo config (or `--global`); reads keyid from `detect` if not given; resolves empty name/email from existing config
 
