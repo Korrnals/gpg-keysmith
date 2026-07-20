@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-20
+
 ### Added
 - M4: `export` command — exports ASCII-armored public key to file (0644), captures private key in memory (never on disk); passphrase via `--passphrase-fd 0` stdin, never CLI arg; keyID hex-validated
 
