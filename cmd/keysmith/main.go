@@ -489,9 +489,16 @@ func yamlMarshal(c config.Config) ([]byte, error) {
 	return yaml.Marshal(&c)
 }
 
+// detectExistingKeysFn is the function-variable seam for
+// gpg.DetectExistingKeys. Tests override it to return canned output
+// without shelling out to real gpg. Production code calls it via this
+// indirection only in runDetect (the detect subcommand) — other
+// subcommands that shell out to gpg are not unit-tested here.
+var detectExistingKeysFn = gpg.DetectExistingKeys
+
 func runDetect(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
-	keys, err := gpg.DetectExistingKeys()
+	keys, err := detectExistingKeysFn()
 	if err != nil {
 		return fmt.Errorf("detect: %w", err)
 	}
