@@ -218,15 +218,3 @@ func GenerateKey(opts GenerateOptions) (keyID string, err error) {
 	}
 	return key.KeyID, nil
 }
-
-// errNotImplemented is the standard sentinel returned by stub functions
-// so callers can distinguish "not yet built" from a real failure.
-func errNotImplemented(op string) error {
-	return &notImplementedError{op: op}
-}
-
-type notImplementedError struct{ op string }
-
-func (e *notImplementedError) Error() string {
-	return "gpg: " + e.op + ": not implemented yet"
-}
