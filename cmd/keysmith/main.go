@@ -22,6 +22,7 @@ import (
 	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
 	"github.com/Korrnals/gpg-keysmith/internal/keyserver"
+	passphrasepkg "github.com/Korrnals/gpg-keysmith/internal/passphrase"
 	"github.com/Korrnals/gpg-keysmith/internal/status"
 	"github.com/Korrnals/gpg-keysmith/internal/wizard"
 	"github.com/spf13/cobra"
@@ -105,18 +106,25 @@ process args, or logs.
 
 Use --name and --email to skip the interactive prompts for those fields
 (non-interactive mode). The passphrase is always prompted via a masked
-survey field.`,
+survey field, UNLESS --passphrase-file <path> is given — then the
+passphrase is read from the file (one passphrase, trailing newline
+stripped) and the masked prompt is skipped entirely. This is intended
+for CI/script usage where no TTY is available. The file should have
+0600 perms; keysmith warns to stderr if the perms are looser. A
+--passphrase <value> flag is deliberately NOT provided because it
+would leak the passphrase via 'ps' and /proc/<pid>/cmdline.`,
 	Args: cobra.NoArgs,
 	RunE: runGenerate,
 }
 
 // generate command flags. Defaults match GenerateOptions defaults.
 var (
-	genName      string
-	genEmail     string
-	genComment   string
-	genKeyLength int
-	genExpiry    string
+	genName           string
+	genEmail          string
+	genComment        string
+	genKeyLength      int
+	genExpiry         string
+	genPassphraseFile string
 )
 
 var exportCmd = &cobra.Command{
@@ -130,16 +138,24 @@ it as a repository secret for CI signing.
 
 Passphrase is collected via a masked prompt — it is never read from a flag
 (which would leak via shell history / ps) and never passed to gpg as a CLI
-arg (it is piped via stdin with --passphrase-fd 0).`,
+arg (it is piped via stdin with --passphrase-fd 0).
+
+For non-interactive CI/script usage, pass --passphrase-file <path>: the
+passphrase is read from the file (one passphrase, trailing newline
+stripped) and the masked prompt is skipped entirely. The file should
+have 0600 perms; keysmith warns to stderr if the perms are looser. This
+only affects the private-key export path; the public-key export does
+not need a passphrase and is unaffected.`,
 	Args: cobra.NoArgs,
 	RunE: runExport,
 }
 
 // export command flags.
 var (
-	expKeyID  string
-	expEmail  string
-	expPubkey string
+	expKeyID          string
+	expEmail          string
+	expPubkey         string
+	expPassphraseFile string
 )
 
 var githubCmd = &cobra.Command{
@@ -339,7 +355,11 @@ cleared.
 Flags pre-fill the survey prompts; any flag left empty is collected
 interactively. --reset clears the state file and starts fresh. The passphrase
 is ALWAYS prompted via a masked survey.Password field (never read from a
-flag — that would leak via shell history / ps).
+flag — that would leak via shell history / ps), UNLESS --passphrase-file
+<path> is given — then the passphrase is read from the file and the masked
+prompt inside the generate/export steps is skipped entirely. This is intended
+for CI/script usage where no TTY is available. The file should have 0600
+perms; keysmith warns to stderr if the perms are looser.
 
 Security: the state file NEVER contains the passphrase or the private key.
 They are held in memory between steps and discarded at the end of the run.`,
@@ -349,15 +369,16 @@ They are held in memory between steps and discarded at the end of the run.`,
 
 // wizard command flags.
 var (
-	wzEmail     string
-	wzName      string
-	wzComment   string
-	wzRepo      string
-	wzKeyLength int
-	wzExpiry    string
-	wzKeyserver string
-	wzStatePath string
-	wzReset     bool
+	wzEmail          string
+	wzName           string
+	wzComment        string
+	wzRepo           string
+	wzKeyLength      int
+	wzExpiry         string
+	wzKeyserver      string
+	wzStatePath      string
+	wzReset          bool
+	wzPassphraseFile string
 )
 
 // config subcommand flags.
@@ -392,10 +413,14 @@ func init() {
 	generateCmd.Flags().StringVar(&genComment, "comment", "", "comment for the key's user id (optional)")
 	generateCmd.Flags().IntVar(&genKeyLength, "key-length", 4096, "RSA key length in bits")
 	generateCmd.Flags().StringVar(&genExpiry, "expiry", "0", "expiry date spec (0 = never, 2y = 2 years)")
+	generateCmd.Flags().StringVar(&genPassphraseFile, "passphrase-file", "",
+		"read passphrase from this file (non-interactive CI/script usage; skips the masked prompt; file perms warn if looser than 0600)")
 
 	exportCmd.Flags().StringVar(&expKeyID, "keyid", "", "long-form key id or fingerprint to export")
 	exportCmd.Flags().StringVar(&expEmail, "email", "", "email of the key to export (alternative to --keyid)")
 	exportCmd.Flags().StringVar(&expPubkey, "pubkey", "gpg-public-key.asc", "output path for the ASCII-armored public key")
+	exportCmd.Flags().StringVar(&expPassphraseFile, "passphrase-file", "",
+		"read passphrase from this file (non-interactive CI/script usage; skips the masked prompt; file perms warn if looser than 0600)")
 
 	gitConfigCmd.Flags().StringVar(&gcKeyID, "keyid", "", "GPG key id to set as user.signingkey (if empty, read from existing config or pick interactively)")
 	gitConfigCmd.Flags().StringVar(&gcName, "name", "", "real name to set as user.name (if empty, keep existing)")
@@ -411,6 +436,8 @@ func init() {
 	wizardCmd.Flags().StringVar(&wzKeyserver, "keyserver", "all", "keyserver target: all (default), openpgp, or ubuntu")
 	wizardCmd.Flags().StringVar(&wzStatePath, "state-path", "", "override state file location (default ~/.config/gpg-keysmith/state.json)")
 	wizardCmd.Flags().BoolVar(&wzReset, "reset", false, "clear the state file and start fresh (ignore prior progress)")
+	wizardCmd.Flags().StringVar(&wzPassphraseFile, "passphrase-file", "",
+		"read passphrase from this file (non-interactive CI/script usage; skips the masked prompt inside generate/export steps; file perms warn if looser than 0600)")
 
 	publishCmd.Flags().StringVar(&pubKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
 	publishCmd.Flags().StringVar(&pubKeyserver, "keyserver", "all", "keyserver target: all (default), openpgp, or ubuntu")
@@ -496,6 +523,13 @@ func yamlMarshal(c config.Config) ([]byte, error) {
 // subcommands that shell out to gpg are not unit-tested here.
 var detectExistingKeysFn = gpg.DetectExistingKeys
 
+// generateKeyFn is the function-variable seam for gpg.GenerateKey.
+// Tests override it to assert runGenerate wires opts.Passphrase from
+// --passphrase-file without shelling out to real gpg or prompting
+// via survey (which would block in a non-TTY test harness). Production
+// code calls the real gpg.GenerateKey through this indirection.
+var generateKeyFn = gpg.GenerateKey
+
 func runDetect(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	keys, err := detectExistingKeysFn()
@@ -531,8 +565,10 @@ func formatExpiry(t time.Time) string {
 // runGenerate collects key parameters via flags + survey prompts, then
 // calls gpg.GenerateKey. Required fields (name, email) that were not set
 // via flags are collected interactively via survey. The passphrase is
-// always prompted via a masked survey.Password field — it is never read
-// from a flag (which would leak via shell history / ps).
+// resolved with precedence: --passphrase-file (non-interactive, skips
+// the masked prompt) > survey.Password (interactive default). It is
+// never read from a --passphrase <value> flag (which would leak via
+// shell history / ps).
 func runGenerate(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
@@ -578,25 +614,48 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("generate: email prompt: %w", err)
 		}
 	}
-	if opts.Comment == "" {
+	// Comment is optional. In non-interactive mode (--passphrase-file
+	// set, indicating a CI/script run without a TTY), skip the prompt
+	// entirely — an empty Comment is valid and the survey would block on
+	// EOF in a non-TTY environment. In interactive mode, prompt so the
+	// user can add a comment or press Enter to skip.
+	if opts.Comment == "" && genPassphraseFile == "" {
 		prompt := &survey.Input{Message: "Comment (optional, press Enter to skip):"}
 		if err := survey.AskOne(prompt, &opts.Comment); err != nil {
 			return fmt.Errorf("generate: comment prompt: %w", err)
 		}
 	}
 
-	// Passphrase is ALWAYS prompted via a masked survey field — never
-	// via a flag (it would leak via shell history / ps). The user must
-	// type it each time; --passphrase-file is a later enhancement.
-	passphrasePrompt := &survey.Password{Message: "Passphrase for the new key:"}
-	if err := survey.AskOne(passphrasePrompt, &opts.Passphrase); err != nil {
-		return fmt.Errorf("generate: passphrase prompt: %w", err)
-	}
-	if opts.Passphrase == "" {
-		return fmt.Errorf("generate: passphrase is required (cannot be empty)")
+	// Passphrase resolution precedence:
+	//   1. --passphrase-file <path> → read from the file, SKIP the
+	//      masked survey prompt entirely (non-interactive CI/script
+	//      mode). The file path is in argv but the passphrase content
+	//      is not — a file does not leak via 'ps' the way a
+	//      --passphrase <value> flag would.
+	//   2. otherwise → masked survey.Password prompt (interactive
+	//      default; requires a real TTY).
+	//
+	// A --passphrase <value> flag is deliberately NOT provided because
+	// it would leak the passphrase via 'ps' and /proc/<pid>/cmdline.
+	if genPassphraseFile != "" {
+		p, err := passphrasepkg.ReadFile("generate", genPassphraseFile, os.Stderr)
+		if err != nil {
+			return err
+		}
+		opts.Passphrase = p
+	} else {
+		// Interactive: masked survey.Password field — never a flag
+		// (would leak via shell history / ps).
+		passphrasePrompt := &survey.Password{Message: "Passphrase for the new key:"}
+		if err := survey.AskOne(passphrasePrompt, &opts.Passphrase); err != nil {
+			return fmt.Errorf("generate: passphrase prompt: %w", err)
+		}
+		if opts.Passphrase == "" {
+			return fmt.Errorf("generate: passphrase is required (cannot be empty)")
+		}
 	}
 
-	keyID, err := gpg.GenerateKey(opts)
+	keyID, err := generateKeyFn(opts)
 	if err != nil {
 		return fmt.Errorf("generate: %w", err)
 	}
@@ -663,16 +722,30 @@ func runExport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Passphrase is ALWAYS prompted via a masked survey field — never
-	// via a flag (would leak via shell history / ps), never via a CLI
-	// arg to gpg (would leak via ps/proc). Piped to gpg via stdin.
+	// Passphrase resolution precedence:
+	//   1. --passphrase-file <path> → read from the file, SKIP the
+	//      masked survey prompt (non-interactive CI/script mode).
+	//   2. otherwise → masked survey.Password prompt (interactive
+	//      default; requires a real TTY).
+	//
+	// A --passphrase <value> flag is deliberately NOT provided (S1:
+	// leaks via 'ps' / /proc/cmdline). The passphrase is piped to gpg
+	// via stdin (--passphrase-fd 0), never as a CLI arg.
 	var passphrase string
-	prompt := &survey.Password{Message: "Passphrase for the key:"}
-	if err := survey.AskOne(prompt, &passphrase); err != nil {
-		return fmt.Errorf("export: passphrase prompt: %w", err)
-	}
-	if passphrase == "" {
-		return fmt.Errorf("export: passphrase is required (cannot be empty)")
+	if expPassphraseFile != "" {
+		p, err := passphrasepkg.ReadFile("export", expPassphraseFile, os.Stderr)
+		if err != nil {
+			return err
+		}
+		passphrase = p
+	} else {
+		prompt := &survey.Password{Message: "Passphrase for the key:"}
+		if err := survey.AskOne(prompt, &passphrase); err != nil {
+			return fmt.Errorf("export: passphrase prompt: %w", err)
+		}
+		if passphrase == "" {
+			return fmt.Errorf("export: passphrase is required (cannot be empty)")
+		}
 	}
 
 	// Export the public key to disk (0644 — it's public, not secret).
@@ -1227,9 +1300,13 @@ func normaliseKeyserverFlag(s string) (string, error) {
 // ignores prior progress. Without --reset, the wizard loads the
 // existing state and resumes from the last incomplete step.
 //
-// The passphrase is NEVER read from a flag (it would leak via shell
-// history / ps). It is collected via survey.Password inside the
-// wizard steps and held in memory, never written to the state file.
+// The passphrase is NEVER read from a --passphrase <value> flag (it
+// would leak via shell history / ps). It is collected via
+// survey.Password inside the wizard steps and held in memory, never
+// written to the state file — UNLESS --passphrase-file <path> is
+// given, in which case the passphrase is read from the file and the
+// wizard steps skip their masked prompts (non-interactive CI/script
+// mode).
 func runWizard(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
@@ -1274,6 +1351,29 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		repo = cfg.GitHub.Repo
 	}
 
+	// Passphrase resolution precedence:
+	//   1. --passphrase-file <path> → read from the file, populate
+	//      opts.Passphrase so the generate/export steps SKIP their
+	//      masked survey.Password prompts (non-interactive CI/script
+	//      mode). The file path is in argv but the passphrase content
+	//      is not — a file does not leak via 'ps' the way a
+	//      --passphrase <value> flag would.
+	//   2. otherwise → opts.Passphrase is empty, and the wizard
+	//      steps prompt via survey.Password (interactive default).
+	//
+	// A --passphrase <value> flag is deliberately NOT provided (S1:
+	// leaks via 'ps' / /proc/cmdline). The passphrase is held in
+	// memory and piped to gpg via stdin; it is never written to the
+	// state file (json:"-" tag on WizardState.Passphrase).
+	var passFromOptions string
+	if wzPassphraseFile != "" {
+		p, err := passphrasepkg.ReadFile("wizard", wzPassphraseFile, os.Stderr)
+		if err != nil {
+			return err
+		}
+		passFromOptions = p
+	}
+
 	opts := wizard.WizardOptions{
 		Email:     wzEmail,
 		Name:      wzName,
@@ -1284,12 +1384,16 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		Keyserver: keyserver,
 		StatePath: statePath,
 		// GitHubToken and Passphrase are intentionally NOT wired from
-		// flags — the wizard collects them via survey.Password so
-		// they never leak via shell history / ps. The github step
-		// resolves the token from the env var named by
-		// GitHubTokenEnv (config.github.token_env, default
-		// GITHUB_TOKEN), then GH_TOKEN, then a masked prompt (S1/S5).
+		// --token / --passphrase flags — a flag would leak via 'ps'
+		// and /proc/cmdline. The wizard collects the token via the
+		// env var named by GitHubTokenEnv (config.github.token_env,
+		// default GITHUB_TOKEN), then GH_TOKEN, then a masked prompt
+		// (S1/S5). The passphrase is collected via survey.Password
+		// inside the wizard steps — UNLESS --passphrase-file was
+		// given, in which case it is populated here from the file and
+		// the wizard steps skip their prompts.
 		GitHubTokenEnv: cfg.GitHub.TokenEnv,
+		Passphrase:     passFromOptions,
 	}
 
 	_, _ = fmt.Fprintln(out, "Starting gpg-keysmith wizard...")
