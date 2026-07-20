@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/AlecAivazis/survey/v2"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
 	"github.com/spf13/cobra"
 )
@@ -41,12 +42,27 @@ to run 'gpg-keysmith generate' if none exist.`,
 
 var generateCmd = &cobra.Command{
 	Use:   "generate",
-	Short: "Generate a new GPG key (stub)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintln(cmd.OutOrStdout(), "generate: not implemented yet")
-		return nil
-	},
+	Short: "Generate a new GPG key",
+	Long: `Generate a new GPG key by driving 'gpg --gen-key' with a batch parameter
+file. The passphrase is collected via a masked prompt and piped to gpg via
+stdin (--pinentry-mode loopback) — it never appears in the batch file,
+process args, or logs.
+
+Use --name and --email to skip the interactive prompts for those fields
+(non-interactive mode). The passphrase is always prompted via a masked
+survey field.`,
+	Args: cobra.NoArgs,
+	RunE: runGenerate,
 }
+
+// generate command flags. Defaults match GenerateOptions defaults.
+var (
+	genName      string
+	genEmail     string
+	genComment   string
+	genKeyLength int
+	genExpiry    string
+)
 
 var exportCmd = &cobra.Command{
 	Use:   "export",
@@ -113,6 +129,12 @@ func init() {
 		statusCmd,
 		wizardCmd,
 	)
+
+	generateCmd.Flags().StringVar(&genName, "name", "", "real name for the key's user id")
+	generateCmd.Flags().StringVar(&genEmail, "email", "", "email for the key's user id")
+	generateCmd.Flags().StringVar(&genComment, "comment", "", "comment for the key's user id (optional)")
+	generateCmd.Flags().IntVar(&genKeyLength, "key-length", 4096, "RSA key length in bits")
+	generateCmd.Flags().StringVar(&genExpiry, "expiry", "0", "expiry date spec (0 = never, 2y = 2 years)")
 }
 
 func runDetect(cmd *cobra.Command, args []string) error {
@@ -145,6 +167,65 @@ func formatExpiry(t time.Time) string {
 		return "never"
 	}
 	return t.Format("2006-01-02 15:04")
+}
+
+// runGenerate collects key parameters via flags + survey prompts, then
+// calls gpg.GenerateKey. Required fields (name, email) that were not set
+// via flags are collected interactively via survey. The passphrase is
+// always prompted via a masked survey.Password field — it is never read
+// from a flag (which would leak via shell history / ps).
+func runGenerate(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+
+	opts := gpg.GenerateOptions{
+		Name:      genName,
+		Email:     genEmail,
+		Comment:   genComment,
+		KeyType:   "RSA",
+		KeyLength: genKeyLength,
+		Expiry:    genExpiry,
+	}
+
+	// Collect missing required fields via survey. If --name and --email
+	// are both set via flags, we skip the interactive prompts (non-
+	// interactive mode). Comment is optional — prompt only if empty.
+	if opts.Name == "" {
+		prompt := &survey.Input{Message: "Real name for the key:"}
+		if err := survey.AskOne(prompt, &opts.Name); err != nil {
+			return fmt.Errorf("generate: name prompt: %w", err)
+		}
+	}
+	if opts.Email == "" {
+		prompt := &survey.Input{Message: "Email for the key:"}
+		if err := survey.AskOne(prompt, &opts.Email); err != nil {
+			return fmt.Errorf("generate: email prompt: %w", err)
+		}
+	}
+	if opts.Comment == "" {
+		prompt := &survey.Input{Message: "Comment (optional, press Enter to skip):"}
+		if err := survey.AskOne(prompt, &opts.Comment); err != nil {
+			return fmt.Errorf("generate: comment prompt: %w", err)
+		}
+	}
+
+	// Passphrase is ALWAYS prompted via a masked survey field — never
+	// via a flag (it would leak via shell history / ps). The user must
+	// type it each time; --passphrase-file is a later enhancement.
+	passphrasePrompt := &survey.Password{Message: "Passphrase for the new key:"}
+	if err := survey.AskOne(passphrasePrompt, &opts.Passphrase); err != nil {
+		return fmt.Errorf("generate: passphrase prompt: %w", err)
+	}
+	if opts.Passphrase == "" {
+		return fmt.Errorf("generate: passphrase is required (cannot be empty)")
+	}
+
+	keyID, err := gpg.GenerateKey(opts)
+	if err != nil {
+		return fmt.Errorf("generate: %w", err)
+	}
+	fmt.Fprintf(out, "Generated new GPG key: %s\n", keyID)
+	fmt.Fprintln(out, "Run 'keysmith detect' to verify.")
+	return nil
 }
 
 func main() {

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- M3: generate — in progress
 - M1: project scaffold — cobra CLI with 8 subcommands, `internal/` package layout
 - M2: `detect` command — parses `gpg --with-colons`, lists existing GPG keys
 
