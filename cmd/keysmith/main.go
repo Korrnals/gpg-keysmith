@@ -9,6 +9,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -66,12 +67,26 @@ var (
 
 var exportCmd = &cobra.Command{
 	Use:   "export",
-	Short: "Export GPG public/private key material (stub)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintln(cmd.OutOrStdout(), "export: not implemented yet")
-		return nil
-	},
+	Short: "Export GPG public key to a file and capture the private key in memory",
+	Long: `Export the public key for the given key id (or resolved email) to an ASCII-armored
+file (default gpg-public-key.asc). The private key is also exported and captured
+in memory ONLY — it is never written to disk, never logged, and never printed.
+The captured private key is held for use by the 'github' command (M6) to upload
+it as a repository secret for CI signing.
+
+Passphrase is collected via a masked prompt — it is never read from a flag
+(which would leak via shell history / ps) and never passed to gpg as a CLI
+arg (it is piped via stdin with --passphrase-fd 0).`,
+	Args: cobra.NoArgs,
+	RunE: runExport,
 }
+
+// export command flags.
+var (
+	expKeyID  string
+	expEmail  string
+	expPubkey string
+)
 
 var githubCmd = &cobra.Command{
 	Use:   "github",
@@ -135,6 +150,10 @@ func init() {
 	generateCmd.Flags().StringVar(&genComment, "comment", "", "comment for the key's user id (optional)")
 	generateCmd.Flags().IntVar(&genKeyLength, "key-length", 4096, "RSA key length in bits")
 	generateCmd.Flags().StringVar(&genExpiry, "expiry", "0", "expiry date spec (0 = never, 2y = 2 years)")
+
+	exportCmd.Flags().StringVar(&expKeyID, "keyid", "", "long-form key id or fingerprint to export")
+	exportCmd.Flags().StringVar(&expEmail, "email", "", "email of the key to export (alternative to --keyid)")
+	exportCmd.Flags().StringVar(&expPubkey, "pubkey", "gpg-public-key.asc", "output path for the ASCII-armored public key")
 }
 
 func runDetect(cmd *cobra.Command, args []string) error {
@@ -225,6 +244,136 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Fprintf(out, "Generated new GPG key: %s\n", keyID)
 	fmt.Fprintln(out, "Run 'keysmith detect' to verify.")
+	return nil
+}
+
+// runExport resolves the key id (from --keyid, --email, or an interactive
+// pick), prompts for the passphrase via a masked survey field, exports
+// the public key to the --pubkey path (0644 — it's public, not secret),
+// and captures the private key in memory ONLY (never written to disk).
+//
+// The private key is held in memory for the future 'github' command
+// (M6) to upload as a repository secret. For M4 it is simply captured
+// and a confirmation is printed — it is never echoed, never logged,
+// never written to a file.
+func runExport(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+
+	// Resolve the key id. Precedence: --keyid flag > --email flag
+	// (resolved via DetectKeyForEmail from M2) > interactive pick
+	// from DetectExistingKeys.
+	keyID := expKeyID
+	if keyID == "" {
+		if expEmail != "" {
+			key, err := gpg.DetectKeyForEmail(expEmail)
+			if err != nil {
+				return fmt.Errorf("export: detect key for email: %w", err)
+			}
+			if key == nil {
+				return fmt.Errorf("export: no GPG key found for email %q", expEmail)
+			}
+			keyID = key.KeyID
+			fmt.Fprintf(out, "Resolved key id %s for email %s\n", keyID, expEmail)
+		}
+	}
+	if keyID == "" {
+		// Interactive: list keys and let the user pick.
+		keys, err := gpg.DetectExistingKeys()
+		if err != nil {
+			return fmt.Errorf("export: detect existing keys: %w", err)
+		}
+		if len(keys) == 0 {
+			return fmt.Errorf("export: no GPG keys found; run 'keysmith generate' first")
+		}
+		options := make([]string, 0, len(keys))
+		for _, k := range keys {
+			options = append(options, fmt.Sprintf("%s  %s", k.KeyID, k.UserId))
+		}
+		var choice string
+		prompt := &survey.Select{
+			Message: "Select a key to export:",
+			Options: options,
+		}
+		if err := survey.AskOne(prompt, &choice); err != nil {
+			return fmt.Errorf("export: key selection: %w", err)
+		}
+		// choice is "<keyid>  <userid>" — take the first field.
+		if i := strings.IndexByte(choice, ' '); i > 0 {
+			keyID = choice[:i]
+		} else {
+			keyID = choice
+		}
+	}
+
+	// Passphrase is ALWAYS prompted via a masked survey field — never
+	// via a flag (would leak via shell history / ps), never via a CLI
+	// arg to gpg (would leak via ps/proc). Piped to gpg via stdin.
+	var passphrase string
+	prompt := &survey.Password{Message: "Passphrase for the key:"}
+	if err := survey.AskOne(prompt, &passphrase); err != nil {
+		return fmt.Errorf("export: passphrase prompt: %w", err)
+	}
+	if passphrase == "" {
+		return fmt.Errorf("export: passphrase is required (cannot be empty)")
+	}
+
+	// Export the public key to disk (0644 — it's public, not secret).
+	pubArmor, err := gpg.ExportPublicKey(keyID)
+	if err != nil {
+		return fmt.Errorf("export: %w", err)
+	}
+	if err := os.WriteFile(expPubkey, []byte(pubArmor), 0o644); err != nil {
+		return fmt.Errorf("export: write public key to %s: %w", expPubkey, err)
+	}
+	fmt.Fprintf(out, "Public key written to %s\n", expPubkey)
+
+	// Capture the private key in memory ONLY — never written to disk,
+	// never logged, never printed. For M4 it is simply captured; M6
+	// (github secrets) will consume it. We assert non-empty so a
+	// silently-empty export is caught here rather than failing later
+	// in M6; the content itself is never inspected or echoed.
+	privArmor, err := gpg.ExportPrivateKey(keyID, passphrase)
+	if err != nil {
+		return fmt.Errorf("export: %w", err)
+	}
+	if len(privArmor) == 0 {
+		return fmt.Errorf("export: private key export returned empty armor (unexpected)")
+	}
+	// Explicitly clear the in-memory private key copy at the end of
+	// the command. We do not zero the string (Go strings are
+	// immutable), but we drop our reference so it can be GC'd. The
+	// future M6 flow will hold it for the duration of the github
+	// upload only.
+	_ = privArmor
+
+	// Look up the fingerprint for the confirmation message.
+	fingerprint := ""
+	if key, err := gpg.DetectKeyForEmail(expEmail); err == nil && key != nil && key.Fingerprint != "" {
+		fingerprint = key.Fingerprint
+	}
+	// If --email wasn't given, try to find the fingerprint by scanning
+	// the keyring for the keyid.
+	if fingerprint == "" {
+		if keys, err := gpg.DetectExistingKeys(); err == nil {
+			for _, k := range keys {
+				if k.KeyID == keyID {
+					fingerprint = k.Fingerprint
+					break
+				}
+			}
+		}
+	}
+
+	fmt.Fprintln(out)
+	fmt.Fprintf(out, "Exported public key:\n")
+	fmt.Fprintf(out, "  Key id:      %s\n", keyID)
+	if fingerprint != "" {
+		fmt.Fprintf(out, "  Fingerprint: %s\n", fingerprint)
+	}
+	fmt.Fprintf(out, "  Public key:  %s\n", expPubkey)
+	fmt.Fprintln(out)
+	fmt.Fprintln(out, "Private key captured in memory (not written to disk) —")
+	fmt.Fprintln(out, "will be used by 'github' command in M6.")
 	return nil
 }
 

@@ -7,10 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- M4: `export` command — exports ASCII-armored public key to file (0644), captures private key in memory (never on disk); passphrase via `--passphrase-fd 0` stdin, never CLI arg; keyID hex-validated
+
 ## [0.2.0] — 2026-07-20
 
 ### Added
-- M3: generate — in progress
+- M3: generate command
 - M1: project scaffold — cobra CLI with 8 subcommands, `internal/` package layout
 - M2: `detect` command — parses `gpg --with-colons`, lists existing GPG keys
 
