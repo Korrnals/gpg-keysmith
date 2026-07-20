@@ -7,10 +7,13 @@ CMD_DIR := ./cmd/keysmith
 .PHONY: default
 default: build
 
-## build: Compile the keysmith binary into ./bin
+## build: Compile + UPX-compress keysmith binary into ./bin
 build:
 	@mkdir -p $(BUILD_DIR)
-	go build -o $(BUILD_DIR)/$(BINARY) $(CMD_DIR)
+	go build -ldflags "-s -w -X main.version=v$$(cat VERSION 2>/dev/null || echo dev)" -o $(BUILD_DIR)/$(BINARY) $(CMD_DIR)
+	@if command -v upx >/dev/null 2>&1 && [ "$$(go env GOOS)" != "darwin" ]; then \
+		upx -q --best $(BUILD_DIR)/$(BINARY) >/dev/null 2>&1 && echo "UPX compressed: $$(du -h $(BUILD_DIR)/$(BINARY) | cut -f1)" || echo "UPX skipped (unsupported)"; \
+	fi
 
 ## run: Build and run keysmith with any args via ARGS=...
 run: build

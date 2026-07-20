@@ -19,6 +19,7 @@ import (
 	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
 	"github.com/Korrnals/gpg-keysmith/internal/keyserver"
+	"github.com/Korrnals/gpg-keysmith/internal/wizard"
 	"github.com/spf13/cobra"
 )
 
@@ -195,12 +196,40 @@ var statusCmd = &cobra.Command{
 
 var wizardCmd = &cobra.Command{
 	Use:   "wizard",
-	Short: "Run the full interactive setup wizard (stub)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintln(cmd.OutOrStdout(), "wizard: not implemented yet")
-		return nil
-	},
+	Short: "Run the full interactive setup wizard (detect → generate → export → git-config → github → publish)",
+	Long: `Run the full gpg-keysmith setup flow end-to-end. The wizard orchestrates the six
+milestones in order: detect existing keys, generate a new key if none, export the
+key, configure git signing, upload the public key to GitHub + set repo secrets +
+open a PR, and publish the public key to a keyserver.
+
+Each step prompts for confirmation, offers retry/skip/abort on failure, and writes
+its completion to ~/.config/gpg-keysmith/state.json so a failed run can be
+resumed from the last successful step. On full completion the state file is
+cleared.
+
+Flags pre-fill the survey prompts; any flag left empty is collected
+interactively. --reset clears the state file and starts fresh. The passphrase
+is ALWAYS prompted via a masked survey.Password field (never read from a
+flag — that would leak via shell history / ps).
+
+Security: the state file NEVER contains the passphrase or the private key.
+They are held in memory between steps and discarded at the end of the run.`,
+	Args: cobra.NoArgs,
+	RunE: runWizard,
 }
+
+// wizard command flags.
+var (
+	wzEmail     string
+	wzName      string
+	wzComment   string
+	wzRepo      string
+	wzKeyLength int
+	wzExpiry    string
+	wzKeyserver string
+	wzStatePath string
+	wzReset     bool
+)
 
 func init() {
 	rootCmd.AddCommand(
@@ -228,6 +257,17 @@ func init() {
 	gitConfigCmd.Flags().StringVar(&gcName, "name", "", "real name to set as user.name (if empty, keep existing)")
 	gitConfigCmd.Flags().StringVar(&gcEmail, "email", "", "email to set as user.email (if empty, keep existing)")
 	gitConfigCmd.Flags().BoolVar(&gcGlobal, "global", false, "write to the global user config instead of the local repo config")
+
+	wizardCmd.Flags().StringVar(&wzEmail, "email", "", "email for the key + git user.email (prompted if empty)")
+	wizardCmd.Flags().StringVar(&wzName, "name", "", "real name for the key + git user.name (prompted if empty)")
+	wizardCmd.Flags().StringVar(&wzComment, "comment", "", "optional comment for the key user id (prompted if empty)")
+	wizardCmd.Flags().StringVar(&wzRepo, "repo", "", "target GitHub repo as owner/name (prompted if empty)")
+	wizardCmd.Flags().IntVar(&wzKeyLength, "key-length", 4096, "RSA key length in bits")
+	wizardCmd.Flags().StringVar(&wzExpiry, "expiry", "0", "expiry date spec (0 = never, 2y = 2 years)")
+	wizardCmd.Flags().StringVar(&wzKeyserver, "keyserver", "all", "keyserver target: all (default), openpgp, or ubuntu")
+	wizardCmd.Flags().StringVar(&wzStatePath, "state-path", "", "override state file location (default ~/.config/gpg-keysmith/state.json)")
+	wizardCmd.Flags().BoolVar(&wzReset, "reset", false, "clear the state file and start fresh (ignore prior progress)")
+
 	publishCmd.Flags().StringVar(&pubKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
 	publishCmd.Flags().StringVar(&pubKeyserver, "keyserver", "all", "keyserver target: all (default), openpgp, or ubuntu")
 	publishCmd.Flags().StringVar(&pubPubkeyFile, "pubkey-file", "", "read armored public key from this file instead of calling gpg --export")
@@ -895,6 +935,61 @@ func normaliseKeyserverFlag(s string) (string, error) {
 	default:
 		return "", fmt.Errorf("invalid --keyserver %q (want all, openpgp, or ubuntu)", s)
 	}
+}
+
+// runWizard implements the 'wizard' subcommand. It translates the
+// CLI flags into a wizard.WizardOptions struct and delegates to
+// wizard.RunWizard, which orchestrates the six steps with resume
+// support.
+//
+// --reset clears the state file before starting so a fresh run
+// ignores prior progress. Without --reset, the wizard loads the
+// existing state and resumes from the last incomplete step.
+//
+// The passphrase is NEVER read from a flag (it would leak via shell
+// history / ps). It is collected via survey.Password inside the
+// wizard steps and held in memory, never written to the state file.
+func runWizard(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+
+	statePath := wzStatePath
+	if statePath == "" {
+		p, err := wizard.DefaultStatePath()
+		if err != nil {
+			return fmt.Errorf("wizard: resolve default state path: %w", err)
+		}
+		statePath = p
+	}
+
+	if wzReset {
+		if err := wizard.ClearState(statePath); err != nil {
+			return fmt.Errorf("wizard: --reset: %w", err)
+		}
+		fmt.Fprintln(out, "State file cleared. Starting fresh.")
+	}
+
+	opts := wizard.WizardOptions{
+		Email:     wzEmail,
+		Name:      wzName,
+		Comment:   wzComment,
+		Repo:      wzRepo,
+		KeyLength: wzKeyLength,
+		Expiry:    wzExpiry,
+		Keyserver: wzKeyserver,
+		StatePath: statePath,
+		// GitHubToken and Passphrase are intentionally NOT wired from
+		// flags — the wizard collects them via survey.Password so
+		// they never leak via shell history / ps. The github step
+		// also reads GITHUB_TOKEN / GH_TOKEN env vars.
+	}
+
+	fmt.Fprintln(out, "Starting gpg-keysmith wizard...")
+	fmt.Fprintln(out, "State file:", statePath)
+	fmt.Fprintln(out)
+	if err := wizard.RunWizard(opts); err != nil {
+		return fmt.Errorf("wizard: %w", err)
+	}
+	return nil
 }
 
 func main() {
