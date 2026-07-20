@@ -2,6 +2,7 @@ package github
 
 import (
 	"errors"
+	"net/http"
 	"os/exec"
 	"strings"
 	"testing"
@@ -193,4 +194,124 @@ func TestRedactInString(t *testing.T) {
 	if !strings.Contains(got, "<REDACTED>") {
 		t.Errorf("redactInString must insert <REDACTED>, got: %q", got)
 	}
+}
+
+// TestListRepoSecrets_EmptyTokenReturnsError verifies the token guard
+// fires before any HTTP call.
+func TestListRepoSecrets_EmptyTokenReturnsError(t *testing.T) {
+	f := &fakeDoer{responses: map[string]func(*http.Request) *http.Response{}}
+	_, err := ListRepoSecretsWithClient("", "owner", "repo", f)
+	if err == nil {
+		t.Fatal("ListRepoSecrets with empty token must error")
+	}
+	if !strings.Contains(err.Error(), "token") {
+		t.Errorf("error should mention token, got: %v", err)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("no HTTP calls should be made with empty token, got %d", len(f.calls))
+	}
+}
+
+// TestListRepoSecrets_EmptyOwnerReturnsError verifies the owner guard.
+func TestListRepoSecrets_EmptyOwnerReturnsError(t *testing.T) {
+	f := &fakeDoer{responses: map[string]func(*http.Request) *http.Response{}}
+	_, err := ListRepoSecretsWithClient("tok", "", "repo", f)
+	if err == nil {
+		t.Fatal("ListRepoSecrets with empty owner must error")
+	}
+	if !strings.Contains(err.Error(), "owner") {
+		t.Errorf("error should mention owner, got: %v", err)
+	}
+}
+
+// TestListRepoSecrets_EmptyRepoReturnsError verifies the repo guard.
+func TestListRepoSecrets_EmptyRepoReturnsError(t *testing.T) {
+	f := &fakeDoer{responses: map[string]func(*http.Request) *http.Response{}}
+	_, err := ListRepoSecretsWithClient("tok", "owner", "", f)
+	if err == nil {
+		t.Fatal("ListRepoSecrets with empty repo must error")
+	}
+	if !strings.Contains(err.Error(), "repo") {
+		t.Errorf("error should mention repo, got: %v", err)
+	}
+}
+
+// TestListRepoSecrets_Success verifies that a 200 response with a
+// secrets array returns the secret names.
+func TestListRepoSecrets_Success(t *testing.T) {
+	f := &fakeDoer{responses: map[string]func(*http.Request) *http.Response{
+		"GET /repos/owner/repo/actions/secrets": func(*http.Request) *http.Response {
+			return jsonResp(200, map[string]interface{}{
+				"secrets": []map[string]string{
+					{"name": "GPG_PRIVATE_KEY"},
+					{"name": "GPG_PASSPHRASE"},
+				},
+			})
+		},
+	}}
+	names, err := ListRepoSecretsWithClient("tok", "owner", "repo", f)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("got %d names, want 2", len(names))
+	}
+	if !containsStr(names, "GPG_PRIVATE_KEY") {
+		t.Errorf("names should contain GPG_PRIVATE_KEY, got %v", names)
+	}
+	if !containsStr(names, "GPG_PASSPHRASE") {
+		t.Errorf("names should contain GPG_PASSPHRASE, got %v", names)
+	}
+	// Verify Authorization header was set.
+	var lastCall recordedCall
+	for _, c := range f.calls {
+		lastCall = c
+	}
+	if lastCall.header.Get("Authorization") != "Bearer tok" {
+		t.Errorf("Authorization = %q, want 'Bearer tok'", lastCall.header.Get("Authorization"))
+	}
+}
+
+// TestListRepoSecrets_EmptyList verifies that a 200 response with no
+// secrets returns an empty slice (not nil, not an error).
+func TestListRepoSecrets_EmptyList(t *testing.T) {
+	f := &fakeDoer{responses: map[string]func(*http.Request) *http.Response{
+		"GET /repos/owner/repo/actions/secrets": func(*http.Request) *http.Response {
+			return jsonResp(200, map[string]interface{}{"secrets": []map[string]string{}})
+		},
+	}}
+	names, err := ListRepoSecretsWithClient("tok", "owner", "repo", f)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("got %d names, want 0", len(names))
+	}
+}
+
+// TestListRepoSecrets_APIError verifies a non-2xx status is surfaced as
+// an error.
+func TestListRepoSecrets_APIError(t *testing.T) {
+	f := &fakeDoer{responses: map[string]func(*http.Request) *http.Response{
+		"GET /repos/owner/repo/actions/secrets": func(*http.Request) *http.Response {
+			return textResp(http.StatusNotFound, `{"message":"Not Found"}`)
+		},
+	}}
+	_, err := ListRepoSecretsWithClient("tok", "owner", "repo", f)
+	if err == nil {
+		t.Fatal("ListRepoSecrets with 404 must error")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Errorf("error should mention status 404, got: %v", err)
+	}
+}
+
+// containsStr is a local helper for test assertions.
+func containsStr(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }

@@ -130,7 +130,7 @@ func gitConfigScope(global bool) []string {
 // set (exit code 1 from git config --get is the "not found" signal,
 // not an error); returns an error only if git fails to run.
 func runGitConfigGet(global bool, key string) (string, error) {
-	args := append(append([]string{}, gitConfigScope(global)...), "--get", key)
+	args := append(append([]string{}, "config"), append(gitConfigScope(global), "--get", key)...)
 	cmd := exec.Command("git", args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -151,7 +151,7 @@ func runGitConfigGet(global bool, key string) (string, error) {
 // 'git config [--global] <key> <value>'. Returns an error if git
 // fails. This is the only mutating call in the package.
 func runGitConfigSet(global bool, key, value string) error {
-	args := append(append([]string{}, gitConfigScope(global)...), key, value)
+	args := append(append([]string{}, "config"), append(gitConfigScope(global), key, value)...)
 	cmd := exec.Command("git", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

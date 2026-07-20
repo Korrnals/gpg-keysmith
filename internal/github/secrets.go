@@ -2,7 +2,9 @@ package github
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os/exec"
 	"strings"
 )
@@ -142,4 +144,74 @@ func redactInString(s, secret string) string {
 		return s
 	}
 	return strings.ReplaceAll(s, secret, "<REDACTED>")
+}
+
+// repoSecretsResponse is the JSON shape returned by
+// GET /repos/{owner}/{repo}/actions/secrets. We only care about the
+// "secrets" array of name objects.
+type repoSecretsResponse struct {
+	Secrets []struct {
+		Name string `json:"name"`
+	} `json:"secrets"`
+}
+
+// ListRepoSecrets lists the names of the Actions secrets set on the
+// given repository via GET /repos/{owner}/{repo}/actions/secrets.
+// Requires a PAT with 'repo' scope. Returns just the secret names —
+// values are never returned by this endpoint (GitHub never exposes
+// secret values via the API, only names).
+//
+// token is a GitHub PAT with repo scope. owner and repo identify the
+// target repository (e.g. "Korrnals", "gpg-keysmith").
+//
+// Security: token is never logged or echoed. The response contains
+// only secret names, not values — GitHub does not expose values via
+// this endpoint.
+func ListRepoSecrets(token, owner, repo string) ([]string, error) {
+	return ListRepoSecretsWithClient(token, owner, repo, defaultHTTPClient)
+}
+
+// ListRepoSecretsWithClient is the testable form of ListRepoSecrets:
+// it accepts a Doer so tests can inject a fake HTTP transport without
+// touching the network.
+func ListRepoSecretsWithClient(token, owner, repo string, c Doer) ([]string, error) {
+	if token == "" {
+		return nil, fmt.Errorf("github: list repo secrets: token is required")
+	}
+	if owner == "" {
+		return nil, fmt.Errorf("github: list repo secrets: owner is required")
+	}
+	if repo == "" {
+		return nil, fmt.Errorf("github: list repo secrets: repo is required")
+	}
+	if c == nil {
+		c = defaultHTTPClient
+	}
+
+	path := fmt.Sprintf("/repos/%s/%s/actions/secrets", owner, repo)
+	req, err := newGitHubRequest(http.MethodGet, path, token, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github: list repo secrets: HTTP request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("github: list repo secrets: GitHub API returned status %d: %s",
+			resp.StatusCode, truncateForError(resp.Body))
+	}
+
+	var body repoSecretsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return nil, fmt.Errorf("github: list repo secrets: decode response: %w", err)
+	}
+	names := make([]string, 0, len(body.Secrets))
+	for _, s := range body.Secrets {
+		if s.Name != "" {
+			names = append(names, s.Name)
+		}
+	}
+	return names, nil
 }

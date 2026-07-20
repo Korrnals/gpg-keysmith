@@ -19,6 +19,7 @@ import (
 	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
 	"github.com/Korrnals/gpg-keysmith/internal/keyserver"
+	"github.com/Korrnals/gpg-keysmith/internal/status"
 	"github.com/Korrnals/gpg-keysmith/internal/wizard"
 	"github.com/spf13/cobra"
 )
@@ -187,12 +188,35 @@ var (
 
 var statusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show current GPG + GitHub setup state (stub)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Fprintln(cmd.OutOrStdout(), "status: not implemented yet")
-		return nil
-	},
+	Short: "Show current GPG + GitHub setup state",
+	Long: `Show the current state of your GPG + GitHub setup with per-step ✅ / ❌ / ⚠️ indicators.
+
+Five checks are performed:
+  1. GPG keys        — local gpg keyring (via 'gpg --list-secret-keys')
+  2. Git config      — user.signingkey + commit.gpgsign in the local repo
+  3. GitHub pubkey   — GPG keys uploaded to your GitHub account
+  4. Repo secrets    — GPG_PRIVATE_KEY and GPG_PASSPHRASE on the target repo
+  5. Keyserver       — public key published to the keyserver (by fingerprint)
+
+Each check emits a one-line remediation hint when it is not green.
+
+Token resolution precedence:
+  1. --token flag
+  2. GITHUB_TOKEN env var
+  3. GH_TOKEN env var
+
+If --repo is omitted, the repo-secrets check degrades to ⚠️.`,
+	Args: cobra.NoArgs,
+	RunE: runStatus,
 }
+
+// status command flags.
+var (
+	stRepo        string
+	stToken       string
+	stKeyserver   string
+	stFingerprint string
+)
 
 var wizardCmd = &cobra.Command{
 	Use:   "wizard",
@@ -271,6 +295,10 @@ func init() {
 	publishCmd.Flags().StringVar(&pubKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
 	publishCmd.Flags().StringVar(&pubKeyserver, "keyserver", "all", "keyserver target: all (default), openpgp, or ubuntu")
 	publishCmd.Flags().StringVar(&pubPubkeyFile, "pubkey-file", "", "read armored public key from this file instead of calling gpg --export")
+	statusCmd.Flags().StringVar(&stRepo, "repo", "", "target repo as owner/name (optional — secrets check degrades to ⚠️ if omitted)")
+	statusCmd.Flags().StringVar(&stToken, "token", "", "GitHub PAT (if empty, read GITHUB_TOKEN or GH_TOKEN env var)")
+	statusCmd.Flags().StringVar(&stKeyserver, "keyserver", "keys.openpgp.org", "keyserver to check for key publication")
+	statusCmd.Flags().StringVar(&stFingerprint, "fingerprint", "", "GPG key fingerprint (optional — derived from first key if empty)")
 	githubCmd.Flags().StringVar(&ghRepo, "repo", "", "target repo as owner/name (required)")
 	githubCmd.Flags().StringVar(&ghToken, "token", "", "GitHub PAT (if empty, read GITHUB_TOKEN or GH_TOKEN env var)")
 	githubCmd.Flags().StringVar(&ghKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
@@ -990,6 +1018,48 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("wizard: %w", err)
 	}
 	return nil
+}
+
+// runStatus implements the 'status' subcommand. It collects the five
+// status checks via status.CollectStatus and prints them as a single
+// aligned table with per-step ✅ / ❌ / ⚠️ indicators.
+func runStatus(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+
+	token := stToken
+	if token == "" {
+		token = os.Getenv("GITHUB_TOKEN")
+	}
+	if token == "" {
+		token = os.Getenv("GH_TOKEN")
+	}
+
+	report := status.CollectStatus(status.StatusOptions{
+		GitHubToken: token,
+		Repo:        stRepo,
+		Keyserver:   stKeyserver,
+		Fingerprint: stFingerprint,
+	})
+
+	rows := []struct {
+		label string
+		cr    status.CheckResult
+	}{
+		{"GPG KEYS", report.GpgKeys},
+		{"GIT CONFIG", report.GitConfig},
+		{"GITHUB PUBKEY", report.GitHubPubKey},
+		{"REPO SECRETS", report.RepoSecrets},
+		{"KEYSERVER", report.Keyserver},
+	}
+
+	tw := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
+	for _, r := range rows {
+		fmt.Fprintf(tw, "  %s\t%s\t%s\n", r.label, r.cr.Status, r.cr.Detail)
+		if r.cr.Hint != "" {
+			fmt.Fprintf(tw, "  \t\t→ %s\n", r.cr.Hint)
+		}
+	}
+	return tw.Flush()
 }
 
 func main() {
