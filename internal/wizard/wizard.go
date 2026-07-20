@@ -124,7 +124,16 @@ type WizardOptions struct {
 	// Repo is the target GitHub repo as "owner/name".
 	Repo string
 	// GitHubToken is a PAT with admin:gpg_key + repo + admin:repo_hook.
+	// If empty, the wizard resolves it from the env var named by
+	// GitHubTokenEnv (default GITHUB_TOKEN), then GH_TOKEN, then a
+	// masked survey prompt. The token is NEVER read from a CLI flag —
+	// a flag would leak via 'ps' and /proc/cmdline (S1).
 	GitHubToken string
+	// GitHubTokenEnv is the name of the env var that holds the GitHub
+	// PAT. Defaults to "GITHUB_TOKEN" when empty. Wires the
+	// config.github.token_env field into the wizard's token resolution
+	// (S5).
+	GitHubTokenEnv string
 	// Passphrase protects the GPG key. If empty, it is prompted via
 	// survey.Password. It is NEVER written to the state file.
 	Passphrase string
@@ -431,11 +440,18 @@ func stepGitHub(state *WizardState, opts WizardOptions) error {
 	}
 	owner, name := parts[0], parts[1]
 
-	// Resolve token. opts.GitHubToken > GITHUB_TOKEN env > GH_TOKEN env
-	// > survey prompt.
+	// Resolve token. opts.GitHubToken > env var named by
+	// opts.GitHubTokenEnv (default GITHUB_TOKEN) > GH_TOKEN env var
+	// > survey prompt. The token is NEVER read from a CLI flag (S1)
+	// and the env var name is configurable via config.github.token_env
+	// (S5).
 	token := opts.GitHubToken
 	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
+		primary := opts.GitHubTokenEnv
+		if primary == "" {
+			primary = "GITHUB_TOKEN"
+		}
+		token = os.Getenv(primary)
 	}
 	if token == "" {
 		token = os.Getenv("GH_TOKEN")
@@ -633,13 +649,13 @@ func RunWizard(opts WizardOptions) error {
 	if statePath == "" {
 		p, err := DefaultStatePath()
 		if err != nil {
-			return err
+			return fmt.Errorf("wizard: resolve state path: %w", err)
 		}
 		statePath = p
 	}
 	state, err := LoadState(statePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("wizard: load state: %w", err)
 	}
 	return runWizardWithState(state, opts)
 }
@@ -676,7 +692,7 @@ func runWizardWithState(state *WizardState, opts WizardOptions) error {
 				// print "done". Continue to the next step.
 				continue
 			}
-			return err
+			return fmt.Errorf("wizard: step %s: %w", name, err)
 		}
 
 		// On success, record and persist.

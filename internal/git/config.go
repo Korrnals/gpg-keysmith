@@ -184,7 +184,7 @@ func runGitConfigSet(global bool, key, value string) error {
 // and re-asserted (idempotent).
 func ApplyGitConfig(opts ConfigOptions) error {
 	if err := validateHexKeyID(opts.KeyID); err != nil {
-		return err
+		return fmt.Errorf("git config: invalid key id: %w", err)
 	}
 
 	resolved := opts
@@ -221,7 +221,7 @@ func ApplyGitConfig(opts ConfigOptions) error {
 	// signing-specific keys last.
 	for _, entry := range configKeysToSet(resolved) {
 		if err := runGitConfigSet(opts.Global, entry.key, entry.value); err != nil {
-			return err
+			return fmt.Errorf("git config: set %s: %w", entry.key, err)
 		}
 	}
 	return nil

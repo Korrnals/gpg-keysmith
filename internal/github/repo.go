@@ -5,8 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -74,11 +74,10 @@ func CommitPublicKeyFileWithClient(token, owner, repo, armoredPubKey string, c D
 	if token == "" {
 		return "", fmt.Errorf("github: commit public key file: token is required")
 	}
-	if owner == "" {
-		return "", fmt.Errorf("github: commit public key file: owner is required")
-	}
-	if repo == "" {
-		return "", fmt.Errorf("github: commit public key file: repo is required")
+	// Validate owner/repo before any HTTP call — rejects path
+	// injection into the /repos/{owner}/{repo} URL segments.
+	if err := ValidateOwnerRepo(owner, repo); err != nil {
+		return "", err
 	}
 	if !strings.HasPrefix(armoredPubKey, pgpArmorHeader) {
 		return "", fmt.Errorf("github: commit public key file: armored public key must start with %q", pgpArmorHeader)
@@ -147,7 +146,11 @@ func CommitPublicKeyFileWithClient(token, owner, repo, armoredPubKey string, c D
 // empty (should not happen on a real repo, but keeps the function
 // total).
 func getDefaultBranch(token, owner, repo string, c Doer) (string, error) {
-	req, err := newGitHubRequest(http.MethodGet, fmt.Sprintf("/repos/%s/%s", owner, repo), token, nil)
+	path, err := reposPath(owner, repo, "")
+	if err != nil {
+		return "", err
+	}
+	req, err := newGitHubRequest(http.MethodGet, path, token, nil)
 	if err != nil {
 		return "", err
 	}
@@ -155,7 +158,7 @@ func getDefaultBranch(token, owner, repo string, c Doer) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("github: get repo: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: get repo: status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
@@ -175,8 +178,14 @@ func getDefaultBranch(token, owner, repo string, c Doer) (string, error) {
 // getBranchHeadSHA returns the SHA of the HEAD commit of the given
 // branch via GET /repos/{owner}/{repo}/branches/{branch}.
 func getBranchHeadSHA(token, owner, repo, branch string, c Doer) (string, error) {
-	req, err := newGitHubRequest(http.MethodGet,
-		fmt.Sprintf("/repos/%s/%s/branches/%s", owner, repo, branch), token, nil)
+	if err := validateBranch(branch); err != nil {
+		return "", err
+	}
+	path, err := reposPath(owner, repo, "/branches/"+branch)
+	if err != nil {
+		return "", err
+	}
+	req, err := newGitHubRequest(http.MethodGet, path, token, nil)
 	if err != nil {
 		return "", err
 	}
@@ -184,7 +193,7 @@ func getBranchHeadSHA(token, owner, repo, branch string, c Doer) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("github: get branch %s: HTTP request failed: %w", branch, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: get branch %s: status %d: %s",
 			branch, resp.StatusCode, truncateForError(resp.Body))
@@ -206,8 +215,11 @@ func getBranchHeadSHA(token, owner, repo, branch string, c Doer) (string, error)
 // getCommitTreeSHA returns the tree SHA of the given commit via
 // GET /repos/{owner}/{repo}/git/commits/{sha}.
 func getCommitTreeSHA(token, owner, repo, commitSHA string, c Doer) (string, error) {
-	req, err := newGitHubRequest(http.MethodGet,
-		fmt.Sprintf("/repos/%s/%s/git/commits/%s", owner, repo, commitSHA), token, nil)
+	path, err := reposPath(owner, repo, "/git/commits/"+url.PathEscape(commitSHA))
+	if err != nil {
+		return "", err
+	}
+	req, err := newGitHubRequest(http.MethodGet, path, token, nil)
 	if err != nil {
 		return "", err
 	}
@@ -215,7 +227,7 @@ func getCommitTreeSHA(token, owner, repo, commitSHA string, c Doer) (string, err
 	if err != nil {
 		return "", fmt.Errorf("github: get commit %s: HTTP request failed: %w", commitSHA, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: get commit %s: status %d: %s",
 			commitSHA, resp.StatusCode, truncateForError(resp.Body))
@@ -245,8 +257,11 @@ func createBlob(token, owner, repo, content string, c Doer) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("github: create blob: marshal body: %w", err)
 	}
-	req, err := newGitHubRequest(http.MethodPost,
-		fmt.Sprintf("/repos/%s/%s/git/blobs", owner, repo), token, bytes.NewReader(body))
+	path, err := reposPath(owner, repo, "/git/blobs")
+	if err != nil {
+		return "", err
+	}
+	req, err := newGitHubRequest(http.MethodPost, path, token, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -254,7 +269,7 @@ func createBlob(token, owner, repo, content string, c Doer) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("github: create blob: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: create blob: status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
@@ -283,8 +298,8 @@ type treeEntry struct {
 // createTree creates a new git tree that adds a single file (with
 // the given blob SHA) on top of baseTreeSHA via
 // POST /repos/{owner}/{repo}/git/trees.
-func createTree(token, owner, repo, baseTreeSHA, path, blobSHA string, c Doer) (string, error) {
-	entry := treeEntry{Path: path, Mode: "100644", Type: "blob", SHA: blobSHA}
+func createTree(token, owner, repo, baseTreeSHA, filePath, blobSHA string, c Doer) (string, error) {
+	entry := treeEntry{Path: filePath, Mode: "100644", Type: "blob", SHA: blobSHA}
 	body, err := json.Marshal(struct {
 		BaseTree string      `json:"base_tree"`
 		Tree     []treeEntry `json:"tree"`
@@ -292,8 +307,11 @@ func createTree(token, owner, repo, baseTreeSHA, path, blobSHA string, c Doer) (
 	if err != nil {
 		return "", fmt.Errorf("github: create tree: marshal body: %w", err)
 	}
-	req, err := newGitHubRequest(http.MethodPost,
-		fmt.Sprintf("/repos/%s/%s/git/trees", owner, repo), token, bytes.NewReader(body))
+	urlPath, err := reposPath(owner, repo, "/git/trees")
+	if err != nil {
+		return "", err
+	}
+	req, err := newGitHubRequest(http.MethodPost, urlPath, token, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -301,7 +319,7 @@ func createTree(token, owner, repo, baseTreeSHA, path, blobSHA string, c Doer) (
 	if err != nil {
 		return "", fmt.Errorf("github: create tree: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: create tree: status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
@@ -330,16 +348,19 @@ func createCommit(token, owner, repo, message, treeSHA string, parents []string,
 	if err != nil {
 		return "", fmt.Errorf("github: create commit: marshal body: %w", err)
 	}
-	req, err := newGitHubRequest(http.MethodPost,
-		fmt.Sprintf("/repos/%s/%s/git/commits", owner, repo), token, bytes.NewReader(body))
+	path, err := reposPath(owner, repo, "/git/commits")
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("github: create commit: build path: %w", err)
+	}
+	req, err := newGitHubRequest(http.MethodPost, path, token, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("github: create commit: build request: %w", err)
 	}
 	resp, err := c.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("github: create commit: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: create commit: status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
@@ -361,22 +382,28 @@ func createCommit(token, owner, repo, message, treeSHA string, parents []string,
 // falls back to POST (branch does not exist). Returns an error only
 // if both fail with a non-422/404 status.
 func upsertBranchRef(token, owner, repo, branch, commitSHA string, c Doer) error {
+	if err := validateBranch(branch); err != nil {
+		return err
+	}
 	patchBody, _ := json.Marshal(struct {
 		SHA string `json:"sha"`
 	}{SHA: commitSHA})
 
 	// Try PATCH first — assumes the branch already exists from a
 	// previous run.
-	patchReq, err := newGitHubRequest(http.MethodPatch,
-		fmt.Sprintf("/repos/%s/%s/git/refs/heads/%s", owner, repo, branch), token, bytes.NewReader(patchBody))
+	patchPath, err := reposPath(owner, repo, "/git/refs/heads/"+branch)
 	if err != nil {
-		return err
+		return fmt.Errorf("github: upsert branch ref (PATCH): build path: %w", err)
+	}
+	patchReq, err := newGitHubRequest(http.MethodPatch, patchPath, token, bytes.NewReader(patchBody))
+	if err != nil {
+		return fmt.Errorf("github: upsert branch ref (PATCH): build request: %w", err)
 	}
 	patchResp, err := c.Do(patchReq)
 	if err != nil {
 		return fmt.Errorf("github: upsert branch ref (PATCH): HTTP request failed: %w", err)
 	}
-	defer patchResp.Body.Close()
+	defer func() { _ = patchResp.Body.Close() }()
 	if patchResp.StatusCode >= 200 && patchResp.StatusCode < 300 {
 		return nil
 	}
@@ -390,16 +417,19 @@ func upsertBranchRef(token, owner, repo, branch, commitSHA string, c Doer) error
 		Ref string `json:"ref"`
 		SHA string `json:"sha"`
 	}{Ref: "refs/heads/" + branch, SHA: commitSHA})
-	postReq, err := newGitHubRequest(http.MethodPost,
-		fmt.Sprintf("/repos/%s/%s/git/refs", owner, repo), token, bytes.NewReader(postBody))
+	postPath, err := reposPath(owner, repo, "/git/refs")
 	if err != nil {
-		return err
+		return fmt.Errorf("github: upsert branch ref (POST): build path: %w", err)
+	}
+	postReq, err := newGitHubRequest(http.MethodPost, postPath, token, bytes.NewReader(postBody))
+	if err != nil {
+		return fmt.Errorf("github: upsert branch ref (POST): build request: %w", err)
 	}
 	postResp, err := c.Do(postReq)
 	if err != nil {
 		return fmt.Errorf("github: upsert branch ref (POST): HTTP request failed: %w", err)
 	}
-	defer postResp.Body.Close()
+	defer func() { _ = postResp.Body.Close() }()
 	if postResp.StatusCode < 200 || postResp.StatusCode >= 300 {
 		return fmt.Errorf("github: upsert branch ref (POST): status %d: %s",
 			postResp.StatusCode, truncateForError(postResp.Body))
@@ -412,6 +442,12 @@ func upsertBranchRef(token, owner, repo, branch, commitSHA string, c Doer) error
 // is already open, GitHub returns 422; we surface a clear error
 // pointing the user to the existing PR.
 func createPullRequest(token, owner, repo, branch, baseBranch string, c Doer) (string, error) {
+	if err := validateBranch(branch); err != nil {
+		return "", err
+	}
+	if err := validateBranch(baseBranch); err != nil {
+		return "", err
+	}
 	body, err := json.Marshal(struct {
 		Title string `json:"title"`
 		Head  string `json:"head"`
@@ -421,8 +457,11 @@ func createPullRequest(token, owner, repo, branch, baseBranch string, c Doer) (s
 	if err != nil {
 		return "", fmt.Errorf("github: create PR: marshal body: %w", err)
 	}
-	req, err := newGitHubRequest(http.MethodPost,
-		fmt.Sprintf("/repos/%s/%s/pulls", owner, repo), token, bytes.NewReader(body))
+	path, err := reposPath(owner, repo, "/pulls")
+	if err != nil {
+		return "", err
+	}
+	req, err := newGitHubRequest(http.MethodPost, path, token, bytes.NewReader(body))
 	if err != nil {
 		return "", err
 	}
@@ -430,7 +469,7 @@ func createPullRequest(token, owner, repo, branch, baseBranch string, c Doer) (s
 	if err != nil {
 		return "", fmt.Errorf("github: create PR: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var out struct {
 			HTMLURL string `json:"html_url"`
@@ -450,11 +489,4 @@ func createPullRequest(token, owner, repo, branch, baseBranch string, c Doer) (s
 	}
 	return "", fmt.Errorf("github: create PR: status %d: %s",
 		resp.StatusCode, truncateForError(resp.Body))
-}
-
-// readerForString returns an io.Reader for the given string. Kept as
-// a helper so the package does not need to import strings.NewReader
-// at multiple call sites.
-func readerForString(s string) io.Reader {
-	return bytes.NewReader([]byte(s))
 }

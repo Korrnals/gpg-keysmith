@@ -55,6 +55,36 @@ func loadConfig() (config.Config, error) {
 	return config.Load(configFile)
 }
 
+// resolveGitHubToken resolves the GitHub PAT from the environment using
+// the precedence:
+//
+//  1. env var named by cfg.GitHub.TokenEnv (default "GITHUB_TOKEN")
+//  2. GH_TOKEN env var as fallback
+//
+// The token is NEVER read from a flag — a --token flag would leak the
+// PAT via 'ps' and /proc/cmdline (S1). This wires the previously-dead
+// config.TokenEnv field into the real token-resolution path (S5): a
+// user can set config.github.token_env: MY_CUSTOM_TOKEN and the tool
+// will read MY_CUSTOM_TOKEN from the env.
+//
+// Returns an error if both env vars are empty so the caller can show a
+// clear "set GITHUB_TOKEN or GH_TOKEN env var" message. If cfg.GitHub.TokenEnv
+// is empty (config missing or malformed), Default() "GITHUB_TOKEN" is
+// used as the primary env var name.
+func resolveGitHubToken(cfg config.Config) (string, error) {
+	primary := cfg.GitHub.TokenEnv
+	if primary == "" {
+		primary = "GITHUB_TOKEN"
+	}
+	if token := os.Getenv(primary); token != "" {
+		return token, nil
+	}
+	if token := os.Getenv("GH_TOKEN"); token != "" {
+		return token, nil
+	}
+	return "", fmt.Errorf("github: GitHub token required (set %s or GH_TOKEN env var)", primary)
+}
+
 var detectCmd = &cobra.Command{
 	Use:   "detect",
 	Short: "List existing GPG secret keys for the current user",
@@ -126,9 +156,12 @@ admin:repo_hook scopes (for the repo secrets). The 'gh' CLI must be installed
 'gh secret set' to avoid a libsodium native binding dependency.
 
 Token resolution precedence:
-  1. --token flag
-  2. GITHUB_TOKEN env var
-  3. GH_TOKEN env var
+  1. env var named by config.github.token_env (default GITHUB_TOKEN)
+  2. GH_TOKEN env var as fallback
+
+The token is NEVER read from a flag — a --token flag would leak via 'ps'
+and /proc/cmdline. Passphrase uses stdin for the same reason; the two
+must stay symmetric.
 
 If --keyid is empty, the key is picked interactively from 'gpg --list-secret-keys'.
 If --pubkey-file is set, the armored public key is read from that file instead
@@ -140,7 +173,6 @@ of calling gpg --export.`,
 // github command flags.
 var (
 	ghRepo       string
-	ghToken      string
 	ghKeyID      string
 	ghPubkeyFile string
 )
@@ -273,9 +305,11 @@ Five checks are performed:
 Each check emits a one-line remediation hint when it is not green.
 
 Token resolution precedence:
-  1. --token flag
-  2. GITHUB_TOKEN env var
-  3. GH_TOKEN env var
+  1. env var named by config.github.token_env (default GITHUB_TOKEN)
+  2. GH_TOKEN env var as fallback
+
+The token is NEVER read from a flag — a --token flag would leak via 'ps'
+and /proc/cmdline.
 
 If --repo is omitted, the repo-secrets check degrades to ⚠️.`,
 	Args: cobra.NoArgs,
@@ -285,7 +319,6 @@ If --repo is omitted, the repo-secrets check degrades to ⚠️.`,
 // status command flags.
 var (
 	stRepo        string
-	stToken       string
 	stKeyserver   string
 	stFingerprint string
 )
@@ -383,11 +416,9 @@ func init() {
 	publishCmd.Flags().StringVar(&pubKeyserver, "keyserver", "all", "keyserver target: all (default), openpgp, or ubuntu")
 	publishCmd.Flags().StringVar(&pubPubkeyFile, "pubkey-file", "", "read armored public key from this file instead of calling gpg --export")
 	statusCmd.Flags().StringVar(&stRepo, "repo", "", "target repo as owner/name (optional — secrets check degrades to ⚠️ if omitted)")
-	statusCmd.Flags().StringVar(&stToken, "token", "", "GitHub PAT (if empty, read GITHUB_TOKEN or GH_TOKEN env var)")
 	statusCmd.Flags().StringVar(&stKeyserver, "keyserver", "keys.openpgp.org", "keyserver to check for key publication")
 	statusCmd.Flags().StringVar(&stFingerprint, "fingerprint", "", "GPG key fingerprint (optional — derived from first key if empty)")
 	githubCmd.Flags().StringVar(&ghRepo, "repo", "", "target repo as owner/name (required)")
-	githubCmd.Flags().StringVar(&ghToken, "token", "", "GitHub PAT (if empty, read GITHUB_TOKEN or GH_TOKEN env var)")
 	githubCmd.Flags().StringVar(&ghKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
 	githubCmd.Flags().StringVar(&ghPubkeyFile, "pubkey-file", "", "read armored public key from this file instead of calling gpg --export")
 }
@@ -408,8 +439,8 @@ func runConfigInit(cmd *cobra.Command, args []string) error {
 	if err := config.Init(path, configInitForce); err != nil {
 		return fmt.Errorf("config init: %w", err)
 	}
-	fmt.Fprintf(out, "Wrote config template to %s\n", path)
-	fmt.Fprintln(out, "Edit it by hand, then run 'keysmith config show' to verify.")
+	_, _ = fmt.Fprintf(out, "Wrote config template to %s\n", path)
+	_, _ = fmt.Fprintln(out, "Edit it by hand, then run 'keysmith config show' to verify.")
 	return nil
 }
 
@@ -421,12 +452,12 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("config show: %w", err)
 	}
-	fmt.Fprintf(out, "# config path: %s\n", resolveConfigPathForShow())
+	_, _ = fmt.Fprintf(out, "# config path: %s\n", resolveConfigPathForShow())
 	data, err := yamlMarshal(c)
 	if err != nil {
 		return fmt.Errorf("config show: marshal: %w", err)
 	}
-	fmt.Fprint(out, string(data))
+	_, _ = fmt.Fprint(out, string(data))
 	return nil
 }
 
@@ -434,7 +465,7 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 // config file path keysmith reads.
 func runConfigPath(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
-	fmt.Fprintln(out, resolveConfigPathForShow())
+	_, _ = fmt.Fprintln(out, resolveConfigPathForShow())
 	return nil
 }
 
@@ -458,21 +489,28 @@ func yamlMarshal(c config.Config) ([]byte, error) {
 	return yaml.Marshal(&c)
 }
 
+// detectExistingKeysFn is the function-variable seam for
+// gpg.DetectExistingKeys. Tests override it to return canned output
+// without shelling out to real gpg. Production code calls it via this
+// indirection only in runDetect (the detect subcommand) — other
+// subcommands that shell out to gpg are not unit-tested here.
+var detectExistingKeysFn = gpg.DetectExistingKeys
+
 func runDetect(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
-	keys, err := gpg.DetectExistingKeys()
+	keys, err := detectExistingKeysFn()
 	if err != nil {
 		return fmt.Errorf("detect: %w", err)
 	}
 	if len(keys) == 0 {
-		fmt.Fprintln(out, "No GPG keys found. Run 'gpg-keysmith generate' to create one.")
+		_, _ = fmt.Fprintln(out, "No GPG keys found. Run 'gpg-keysmith generate' to create one.")
 		return nil
 	}
-	fmt.Fprintf(out, "Found %d GPG key(s):\n\n", len(keys))
+	_, _ = fmt.Fprintf(out, "Found %d GPG key(s):\n\n", len(keys))
 	tw := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "  KEY ID\tTYPE\tCREATED\tEXPIRES\tUSER ID")
+	_, _ = fmt.Fprintln(tw, "  KEY ID\tTYPE\tCREATED\tEXPIRES\tUSER ID")
 	for _, k := range keys {
-		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n",
 			k.KeyID,
 			k.Type,
 			k.Created.Format("2006-01-02 15:04"),
@@ -562,8 +600,8 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("generate: %w", err)
 	}
-	fmt.Fprintf(out, "Generated new GPG key: %s\n", keyID)
-	fmt.Fprintln(out, "Run 'keysmith detect' to verify.")
+	_, _ = fmt.Fprintf(out, "Generated new GPG key: %s\n", keyID)
+	_, _ = fmt.Fprintln(out, "Run 'keysmith detect' to verify.")
 	return nil
 }
 
@@ -593,7 +631,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("export: no GPG key found for email %q", expEmail)
 			}
 			keyID = key.KeyID
-			fmt.Fprintf(out, "Resolved key id %s for email %s\n", keyID, expEmail)
+			_, _ = fmt.Fprintf(out, "Resolved key id %s for email %s\n", keyID, expEmail)
 		}
 	}
 	if keyID == "" {
@@ -645,7 +683,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	if err := os.WriteFile(expPubkey, []byte(pubArmor), 0o644); err != nil {
 		return fmt.Errorf("export: write public key to %s: %w", expPubkey, err)
 	}
-	fmt.Fprintf(out, "Public key written to %s\n", expPubkey)
+	_, _ = fmt.Fprintf(out, "Public key written to %s\n", expPubkey)
 
 	// Capture the private key in memory ONLY — never written to disk,
 	// never logged, never printed. For M4 it is simply captured; M6
@@ -684,16 +722,16 @@ func runExport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Exported public key:\n")
-	fmt.Fprintf(out, "  Key id:      %s\n", keyID)
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Exported public key:\n")
+	_, _ = fmt.Fprintf(out, "  Key id:      %s\n", keyID)
 	if fingerprint != "" {
-		fmt.Fprintf(out, "  Fingerprint: %s\n", fingerprint)
+		_, _ = fmt.Fprintf(out, "  Fingerprint: %s\n", fingerprint)
 	}
-	fmt.Fprintf(out, "  Public key:  %s\n", expPubkey)
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Private key captured in memory (not written to disk) —")
-	fmt.Fprintln(out, "will be used by 'github' command in M6.")
+	_, _ = fmt.Fprintf(out, "  Public key:  %s\n", expPubkey)
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Private key captured in memory (not written to disk) —")
+	_, _ = fmt.Fprintln(out, "will be used by 'github' command in M6.")
 	return nil
 }
 
@@ -725,7 +763,7 @@ func runGitConfig(cmd *cobra.Command, args []string) error {
 		}
 		if existing != "" {
 			keyID = existing
-			fmt.Fprintf(out, "Reusing existing user.signingkey: %s\n", keyID)
+			_, _ = fmt.Fprintf(out, "Reusing existing user.signingkey: %s\n", keyID)
 		}
 	}
 
@@ -776,17 +814,17 @@ func runGitConfig(cmd *cobra.Command, args []string) error {
 	if gcGlobal {
 		scope = "global user config"
 	}
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Git signing configured (%s):\n", scope)
-	fmt.Fprintf(out, "  user.name         = %s\n", nonEmptyOr(gcName, "(kept existing)"))
-	fmt.Fprintf(out, "  user.email        = %s\n", nonEmptyOr(gcEmail, "(kept existing)"))
-	fmt.Fprintf(out, "  user.signingkey   = %s\n", keyID)
-	fmt.Fprintf(out, "  commit.gpgsign    = true\n")
-	fmt.Fprintf(out, "  gpg.format        = openpgp\n")
-	fmt.Fprintf(out, "  tag.gpgsign       = true\n")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Verify with: git config --local --list | grep -E 'gpg|signingkey'")
-	fmt.Fprintln(out, "Test a signed commit: git commit -S --allow-empty -m test && git verify-commit HEAD")
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Git signing configured (%s):\n", scope)
+	_, _ = fmt.Fprintf(out, "  user.name         = %s\n", nonEmptyOr(gcName, "(kept existing)"))
+	_, _ = fmt.Fprintf(out, "  user.email        = %s\n", nonEmptyOr(gcEmail, "(kept existing)"))
+	_, _ = fmt.Fprintf(out, "  user.signingkey   = %s\n", keyID)
+	_, _ = fmt.Fprintf(out, "  commit.gpgsign    = true\n")
+	_, _ = fmt.Fprintf(out, "  gpg.format        = openpgp\n")
+	_, _ = fmt.Fprintf(out, "  tag.gpgsign       = true\n")
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Verify with: git config --local --list | grep -E 'gpg|signingkey'")
+	_, _ = fmt.Fprintln(out, "Test a signed commit: git commit -S --allow-empty -m test && git verify-commit HEAD")
 	return nil
 }
 
@@ -801,7 +839,7 @@ func nonEmptyOr(s, fallback string) string {
 
 // runGithub implements the 'github' subcommand. It:
 //  1. Resolves the target repo (owner/name) from --repo.
-//  2. Resolves the GitHub token (--token > GITHUB_TOKEN > GH_TOKEN).
+//  2. Resolves the GitHub token (env var named by config.github.token_env, then GH_TOKEN).
 //  3. Resolves the GPG key id (--keyid > interactive pick from detect).
 //  4. Obtains the armored public key (--pubkey-file > gpg.ExportPublicKey).
 //  5. Looks up the fingerprint for the chosen key (for dedup).
@@ -818,17 +856,21 @@ func nonEmptyOr(s, fallback string) string {
 //
 // Security: token, private key, and passphrase are NEVER logged,
 // printed, or written to disk. Error messages use <REDACTED> for
-// secret values.
+// secret values. The token is never read from a flag (S1) — env-only
+// resolution avoids leaking the PAT via 'ps' and /proc/cmdline.
 func runGithub(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
+
+	// Load config once — used for both --repo default and token-env
+	// name resolution.
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("github: load config: %w", err)
+	}
 
 	// Apply config default for --repo if the user did not set it.
 	repo := ghRepo
 	if !cmd.Flags().Changed("repo") && repo == "" {
-		cfg, err := loadConfig()
-		if err != nil {
-			return fmt.Errorf("github: load config: %w", err)
-		}
 		repo = cfg.GitHub.Repo
 	}
 
@@ -842,16 +884,12 @@ func runGithub(cmd *cobra.Command, args []string) error {
 	}
 	owner, repo := parts[0], parts[1]
 
-	// 2. Resolve token. --token > GITHUB_TOKEN > GH_TOKEN.
-	token := ghToken
-	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
-	}
-	if token == "" {
-		token = os.Getenv("GH_TOKEN")
-	}
-	if token == "" {
-		return fmt.Errorf("github: GitHub token required (set GITHUB_TOKEN env or pass --token)")
+	// 2. Resolve token from the env var named by config.github.token_env
+	// (default GITHUB_TOKEN), then GH_TOKEN as fallback. The token is
+	// NEVER read from a flag — a --token flag would leak via ps/proc.
+	token, err := resolveGitHubToken(cfg)
+	if err != nil {
+		return err
 	}
 
 	// 3. Resolve key id. --keyid > interactive pick from detect.
@@ -940,8 +978,8 @@ func runGithub(cmd *cobra.Command, args []string) error {
 	// 8. Upload the public key to GitHub. If a key with the same
 	// fingerprint is already present, the upload is skipped and the
 	// existing fingerprint is returned.
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "==> Uploading public key to GitHub...")
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "==> Uploading public key to GitHub...")
 	uploadedFP, err = github.UploadPublicKeyWithFingerprint(token, pubArmor, fingerprint)
 	if err != nil {
 		// Report what we have so far and stop — the user needs to
@@ -954,20 +992,20 @@ func runGithub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("github: upload public key: %w", err)
 	}
 	didUploadPubkey = true
-	fmt.Fprintf(out, "    Public key uploaded (fingerprint: %s)\n", uploadedFP)
+	_, _ = fmt.Fprintf(out, "    Public key uploaded (fingerprint: %s)\n", uploadedFP)
 
 	// 9. Set GPG_PRIVATE_KEY and GPG_PASSPHRASE repo secrets via gh CLI.
-	fmt.Fprintln(out, "==> Setting repo secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE...")
+	_, _ = fmt.Fprintln(out, "==> Setting repo secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE...")
 	if err := github.SetGPGSecrets(token, owner, repo, privArmor, passphrase); err != nil {
 		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
 			didSetSecrets, didOpenPR, prURL)
 		return fmt.Errorf("github: set repo secrets: %w", err)
 	}
 	didSetSecrets = true
-	fmt.Fprintln(out, "    Secrets set: GPG_PRIVATE_KEY, GPG_PASSPHRASE")
+	_, _ = fmt.Fprintln(out, "    Secrets set: GPG_PRIVATE_KEY, GPG_PASSPHRASE")
 
 	// 10. Commit gpg-public-key.asc and open a PR.
-	fmt.Fprintln(out, "==> Committing gpg-public-key.asc and opening PR...")
+	_, _ = fmt.Fprintln(out, "==> Committing gpg-public-key.asc and opening PR...")
 	prURL, err = github.CommitPublicKeyFile(token, owner, repo, pubArmor)
 	if err != nil {
 		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
@@ -975,7 +1013,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("github: commit + open PR: %w", err)
 	}
 	didOpenPR = true
-	fmt.Fprintf(out, "    PR opened: %s\n", prURL)
+	_, _ = fmt.Fprintf(out, "    PR opened: %s\n", prURL)
 
 	// Final summary.
 	printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
@@ -991,25 +1029,25 @@ func runGithub(cmd *cobra.Command, args []string) error {
 func printGithubSummary(out io.Writer, owner, repo string,
 	didUploadPubkey bool, fingerprint string,
 	didSetSecrets bool, didOpenPR bool, prURL string) {
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "GitHub setup summary for %s/%s:\n", owner, repo)
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "GitHub setup summary for %s/%s:\n", owner, repo)
 	mark := func(ok bool) string {
 		if ok {
 			return "✅"
 		}
 		return "❌"
 	}
-	fmt.Fprintf(out, "  %s Public key uploaded to GitHub user account", mark(didUploadPubkey))
+	_, _ = fmt.Fprintf(out, "  %s Public key uploaded to GitHub user account", mark(didUploadPubkey))
 	if didUploadPubkey && fingerprint != "" {
-		fmt.Fprintf(out, " (fingerprint: %s)", fingerprint)
+		_, _ = fmt.Fprintf(out, " (fingerprint: %s)", fingerprint)
 	}
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  %s Repo secrets set (GPG_PRIVATE_KEY, GPG_PASSPHRASE)\n", mark(didSetSecrets))
-	fmt.Fprintf(out, "  %s PR opened with gpg-public-key.asc", mark(didOpenPR))
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "  %s Repo secrets set (GPG_PRIVATE_KEY, GPG_PASSPHRASE)\n", mark(didSetSecrets))
+	_, _ = fmt.Fprintf(out, "  %s PR opened with gpg-public-key.asc", mark(didOpenPR))
 	if didOpenPR && prURL != "" {
-		fmt.Fprintf(out, ": %s", prURL)
+		_, _ = fmt.Fprintf(out, ": %s", prURL)
 	}
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out)
 }
 
 // runPublish implements the 'publish' subcommand. It:
@@ -1104,7 +1142,7 @@ func runPublish(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Publish.
-	fmt.Fprintf(out, "Publishing public key %s to %s...\n", keyID, ks)
+	_, _ = fmt.Fprintf(out, "Publishing public key %s to %s...\n", keyID, ks)
 	results, err := keyserver.PublishPubKey(keyserver.PublishOptions{
 		ArmoredPubKey: pubArmor,
 		Keyserver:     ks,
@@ -1117,7 +1155,7 @@ func runPublish(cmd *cobra.Command, args []string) error {
 	// Print per-keyserver results. A per-keyserver failure is shown
 	// but does not abort the loop — we want the user to see the state
 	// of every keyserver we contacted.
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out)
 	anySuccess := false
 	for _, r := range results {
 		mark := "❌"
@@ -1125,14 +1163,14 @@ func runPublish(cmd *cobra.Command, args []string) error {
 			mark = "✅"
 			anySuccess = true
 		}
-		fmt.Fprintf(out, "  %s %s", mark, r.Keyserver)
+		_, _ = fmt.Fprintf(out, "  %s %s", mark, r.Keyserver)
 		if r.URL != "" {
-			fmt.Fprintf(out, " — %s", r.URL)
+			_, _ = fmt.Fprintf(out, " — %s", r.URL)
 		}
 		if r.Err != nil {
-			fmt.Fprintf(out, "\n      %v", r.Err)
+			_, _ = fmt.Fprintf(out, "\n      %v", r.Err)
 		}
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out)
 	}
 
 	if !anySuccess {
@@ -1187,7 +1225,7 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		if err := wizard.ClearState(statePath); err != nil {
 			return fmt.Errorf("wizard: --reset: %w", err)
 		}
-		fmt.Fprintln(out, "State file cleared. Starting fresh.")
+		_, _ = fmt.Fprintln(out, "State file cleared. Starting fresh.")
 	}
 
 	// Apply config defaults for flags the user did not set explicitly.
@@ -1227,12 +1265,15 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		// GitHubToken and Passphrase are intentionally NOT wired from
 		// flags — the wizard collects them via survey.Password so
 		// they never leak via shell history / ps. The github step
-		// also reads GITHUB_TOKEN / GH_TOKEN env vars.
+		// resolves the token from the env var named by
+		// GitHubTokenEnv (config.github.token_env, default
+		// GITHUB_TOKEN), then GH_TOKEN, then a masked prompt (S1/S5).
+		GitHubTokenEnv: cfg.GitHub.TokenEnv,
 	}
 
-	fmt.Fprintln(out, "Starting gpg-keysmith wizard...")
-	fmt.Fprintln(out, "State file:", statePath)
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Starting gpg-keysmith wizard...")
+	_, _ = fmt.Fprintln(out, "State file:", statePath)
+	_, _ = fmt.Fprintln(out)
 	if err := wizard.RunWizard(opts); err != nil {
 		return fmt.Errorf("wizard: %w", err)
 	}
@@ -1245,31 +1286,38 @@ func runWizard(cmd *cobra.Command, args []string) error {
 func runStatus(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
-	token := stToken
-	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
+	// Load config once — used for --repo/--keyserver defaults and
+	// token-env name resolution.
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("status: load config: %w", err)
 	}
-	if token == "" {
-		token = os.Getenv("GH_TOKEN")
+
+	// Resolve token from the env var named by config.github.token_env
+	// (default GITHUB_TOKEN), then GH_TOKEN as fallback. The token is
+	// NEVER read from a flag — env-only resolution avoids leaking the
+	// PAT via 'ps' and /proc/cmdline (S1).
+	token, err := resolveGitHubToken(cfg)
+	if err != nil {
+		// status degrades to ⚠️ on missing token rather than failing,
+		// so an absent token is not a hard error here. resolveGitHubToken
+		// returns an error only when both env vars are empty; we keep
+		// the token empty and let CollectStatus emit the ⚠️ rows.
+		token = ""
+		_ = err
 	}
 
 	// Apply config defaults for --repo and --keyserver when the user
-	// did not set them. The token is never read from config (config
-	// stores only the env var NAME, not the value) — token resolution
-	// stays on the flag/env precedence.
+	// did not set them.
 	repo := stRepo
 	keyserverVal := stKeyserver
-	if !cmd.Flags().Changed("repo") || !cmd.Flags().Changed("keyserver") {
-		cfg, err := loadConfig()
-		if err != nil {
-			return fmt.Errorf("status: load config: %w", err)
-		}
-		if !cmd.Flags().Changed("repo") && repo == "" {
+	if !cmd.Flags().Changed("repo") {
+		if repo == "" {
 			repo = cfg.GitHub.Repo
 		}
-		if !cmd.Flags().Changed("keyserver") && cfg.Keyserver.Preferred != "" {
-			keyserverVal = cfg.Keyserver.Preferred
-		}
+	}
+	if !cmd.Flags().Changed("keyserver") && cfg.Keyserver.Preferred != "" {
+		keyserverVal = cfg.Keyserver.Preferred
 	}
 
 	report := status.CollectStatus(status.StatusOptions{
@@ -1292,9 +1340,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	tw := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 	for _, r := range rows {
-		fmt.Fprintf(tw, "  %s\t%s\t%s\n", r.label, r.cr.Status, r.cr.Detail)
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\n", r.label, r.cr.Status, r.cr.Detail)
 		if r.cr.Hint != "" {
-			fmt.Fprintf(tw, "  \t\t→ %s\n", r.cr.Hint)
+			_, _ = fmt.Fprintf(tw, "  \t\t→ %s\n", r.cr.Hint)
 		}
 	}
 	return tw.Flush()

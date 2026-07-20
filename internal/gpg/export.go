@@ -7,29 +7,6 @@ import (
 	"strings"
 )
 
-// ExportOptions describes the inputs for a key export. It is optional
-// — callers may use ExportPublicKey / ExportPrivateKey directly.
-//
-// ExportOptions is provided for symmetry with GenerateOptions and for
-// future use by the wizard and the github command (M6). The current
-// export command wires flags directly to the function-level options.
-type ExportOptions struct {
-	// KeyID is the long-form key id or fingerprint to export.
-	// Required — validated via ValidateKeyID before being passed to
-	// gpg to prevent shell injection into the gpg arg vector.
-	KeyID string
-	// Passphrase protects the secret key being exported. Required for
-	// ExportPrivateKey; not used by ExportPublicKey. Piped to gpg via
-	// stdin (--passphrase-fd 0), never passed as a CLI arg, never
-	// logged, never written to disk.
-	Passphrase string
-	// PubkeyPath is the filesystem path where the public key ASCII
-	// armor will be written (by the caller, not by this package). The
-	// gpg package never writes the public key to disk itself — it
-	// returns the armored string so the caller controls the write.
-	PubkeyPath string
-}
-
 // ValidateKeyID rejects key IDs that could be used to inject extra
 // arguments into the gpg command line. gpg key IDs are hex strings or
 // fingerprints — at most 40 hex chars, optionally starting with "0x".

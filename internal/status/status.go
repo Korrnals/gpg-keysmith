@@ -16,6 +16,7 @@ import (
 	"github.com/Korrnals/gpg-keysmith/internal/git"
 	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
+	ks "github.com/Korrnals/gpg-keysmith/internal/keyserver"
 )
 
 // Status indicator constants used in CheckResult.Status.
@@ -295,6 +296,17 @@ func checkKeyserver(fingerprint, keyserver string) CheckResult {
 			Hint:   "Run 'keysmith generate' first",
 		}
 	}
+	// Validate the fingerprint before it is interpolated into the
+	// keyserver lookup URL — a malformed value could inject path or
+	// query segments. This reuses keyserver.ValidateFingerprint so the
+	// status check and the publish path share one validator.
+	if err := ks.ValidateFingerprint(fingerprint); err != nil {
+		return CheckResult{
+			Status: StatusFail,
+			Detail: fmt.Sprintf("invalid fingerprint: %v", err),
+			Hint:   "Pass a 40-char hex fingerprint via --fingerprint",
+		}
+	}
 	urlStr := keyserverLookupURL(keyserver, fingerprint)
 	req, err := http.NewRequest(http.MethodGet, urlStr, nil)
 	if err != nil {
@@ -312,17 +324,17 @@ func checkKeyserver(fingerprint, keyserver string) CheckResult {
 			Hint:   "Check your network connection",
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Drain the body so the connection can be reused.
 	_, _ = io.Copy(io.Discard, resp.Body)
 
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	switch resp.StatusCode {
+	case http.StatusOK:
 		return CheckResult{
 			Status: StatusOK,
 			Detail: fmt.Sprintf("published (%s)", keyserver),
 		}
-	case resp.StatusCode == http.StatusNotFound:
+	case http.StatusNotFound:
 		return CheckResult{
 			Status: StatusFail,
 			Detail: fmt.Sprintf("not found on %s", keyserver),

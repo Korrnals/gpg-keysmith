@@ -21,6 +21,37 @@ import (
 // that error).
 const pgpArmorHeader = "-----BEGIN PGP PUBLIC KEY BLOCK-----"
 
+// ValidateFingerprint rejects fingerprints that are not a 40-char hex
+// SHA-1 OpenPGP v4 fingerprint after stripping an optional "0x" prefix
+// and spaces. It is called before any fingerprint is interpolated into
+// a keyserver URL so a malformed or adversarial value cannot inject
+// path or query segments.
+//
+// The validation reuses the same hex-shape logic as gpg.ValidateKeyID
+// but is stricter on length (exactly 40, not ≤40) because a full
+// fingerprint is the only thing that should ever reach a keyserver
+// lookup URL — a short key id is ambiguous and historically a vector
+// for key-collision attacks.
+func ValidateFingerprint(fp string) error {
+	s := strings.TrimSpace(fp)
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+	s = strings.ReplaceAll(s, " ", "")
+	if s == "" {
+		return fmt.Errorf("keyserver: fingerprint is required")
+	}
+	if len(s) != 40 {
+		return fmt.Errorf("keyserver: fingerprint must be 40 hex chars (got %d after stripping 0x and spaces)", len(s))
+	}
+	for _, r := range s {
+		isHex := (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')
+		if !isHex {
+			return fmt.Errorf("keyserver: fingerprint must be hex (0-9, A-F), got %q", fp)
+		}
+	}
+	return nil
+}
+
 // httpDoer is the HTTP client interface used by the keyserver package.
 // It matches *http.Client.Do. Tests inject a fake Doer to exercise the
 // keyserver API surface without hitting the network.
@@ -141,10 +172,17 @@ func PublishPubKey(opts PublishOptions) ([]PublishResult, error) {
 	}
 
 	// Resolve the fingerprint: prefer the explicit option, then try
-	// to extract it from the armor.
+	// to extract it from the armor. If we have one, validate it
+	// before it is interpolated into any keyserver URL — a malformed
+	// or adversarial fingerprint could inject path/query segments.
 	fp := strings.TrimSpace(opts.Fingerprint)
 	if fp == "" {
 		fp = extractFingerprintFromArmor(opts.ArmoredPubKey)
+	}
+	if fp != "" {
+		if err := ValidateFingerprint(fp); err != nil {
+			return nil, err
+		}
 	}
 
 	var results []PublishResult
@@ -209,7 +247,7 @@ func publishToOpenPGP(armoredPubKey, fingerprint string, doer httpDoer) PublishR
 			Err:       fmt.Errorf("keyserver: publish to %s: HTTP request failed: %w", KeyserverOpenPGP, err),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return PublishResult{
@@ -268,7 +306,7 @@ func publishToUbuntu(armoredPubKey, fingerprint string, doer httpDoer) PublishRe
 			Err:       fmt.Errorf("keyserver: publish to %s: HTTP request failed: %w", KeyserverUbuntu, err),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return PublishResult{

@@ -52,11 +52,8 @@ func SetRepoSecret(token, owner, repo, secretName, secretValue string) error {
 	if token == "" {
 		return fmt.Errorf("github: set repo secret: token is required")
 	}
-	if owner == "" {
-		return fmt.Errorf("github: set repo secret: owner is required")
-	}
-	if repo == "" {
-		return fmt.Errorf("github: set repo secret: repo is required")
+	if err := ValidateOwnerRepo(owner, repo); err != nil {
+		return err
 	}
 	if err := validateSecretName(secretName); err != nil {
 		return fmt.Errorf("github: set repo secret: %w", err)
@@ -71,8 +68,13 @@ func SetRepoSecret(token, owner, repo, secretName, secretValue string) error {
 
 	// gh secret set <name> --repo <owner>/<repo> --body -
 	// feeds the value via stdin, never via argv. This avoids leaking
-	// the secret through the process arg list (ps/proc).
-	repoArg := owner + "/" + repo
+	// the secret through the process arg list (ps/proc). The
+	// owner/repo pair is validated by ValidateOwnerRepo above before
+	// it reaches the CLI arg vector.
+	repoArg, err := ownerRepoArg(owner, repo)
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command("gh", "secret", "set", secretName, "--repo", repoArg, "--body", "-")
 	cmd.Stdin = strings.NewReader(secretValue)
 	var stderr bytes.Buffer
@@ -178,17 +180,17 @@ func ListRepoSecretsWithClient(token, owner, repo string, c Doer) ([]string, err
 	if token == "" {
 		return nil, fmt.Errorf("github: list repo secrets: token is required")
 	}
-	if owner == "" {
-		return nil, fmt.Errorf("github: list repo secrets: owner is required")
-	}
-	if repo == "" {
-		return nil, fmt.Errorf("github: list repo secrets: repo is required")
+	if err := ValidateOwnerRepo(owner, repo); err != nil {
+		return nil, err
 	}
 	if c == nil {
 		c = defaultHTTPClient
 	}
 
-	path := fmt.Sprintf("/repos/%s/%s/actions/secrets", owner, repo)
+	path, err := reposPath(owner, repo, "/actions/secrets")
+	if err != nil {
+		return nil, err
+	}
 	req, err := newGitHubRequest(http.MethodGet, path, token, nil)
 	if err != nil {
 		return nil, err
@@ -197,7 +199,7 @@ func ListRepoSecretsWithClient(token, owner, repo string, c Doer) ([]string, err
 	if err != nil {
 		return nil, fmt.Errorf("github: list repo secrets: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("github: list repo secrets: GitHub API returned status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
