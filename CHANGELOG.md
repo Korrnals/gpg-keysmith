@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-07-20
+
 ### Added
 - M11: docs — in progress
 - M10: `config` command — persistent defaults (`~/.config/gpg-keysmith/config.yaml`), `config init`/`show`/`path`, `--config` flag, shell completion (`completion bash`/`zsh`/`fish`)
