@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/AlecAivazis/survey/v2"
+	"gopkg.in/yaml.v3"
+
+	"github.com/Korrnals/gpg-keysmith/internal/config"
 	"github.com/Korrnals/gpg-keysmith/internal/git"
 	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
@@ -23,6 +26,12 @@ import (
 	"github.com/Korrnals/gpg-keysmith/internal/wizard"
 	"github.com/spf13/cobra"
 )
+
+// configFile is the path to the gpg-keysmith config.yaml. Set by the
+// global --config flag. An empty value means "use the default path"
+// (~/.config/gpg-keysmith/config.yaml), resolved lazily so a missing
+// file degrades to Default() without error.
+var configFile string
 
 var rootCmd = &cobra.Command{
 	Use:   "keysmith",
@@ -35,6 +44,15 @@ private key as a repository secret for CI signing.
 Run 'keysmith wizard' for the full interactive setup, or 'keysmith detect'
 to list existing GPG keys.`,
 	SilenceUsage: true,
+}
+
+// loadConfig loads the config from the --config path (or the default
+// path if --config is empty). A missing file returns Default() with no
+// error, so callers always get a usable Config. A malformed file
+// returns an error so the user is not silently running on stale or
+// broken defaults.
+func loadConfig() (config.Config, error) {
+	return config.Load(configFile)
 }
 
 var detectCmd = &cobra.Command{
@@ -186,6 +204,60 @@ var (
 	pubPubkeyFile string
 )
 
+// configCmd is the parent for the 'config' subcommand group
+// (init / show / path).
+var configCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Manage the gpg-keysmith config file",
+	Long: `Manage the gpg-keysmith config file at ~/.config/gpg-keysmith/config.yaml
+(or the path passed via --config).
+
+The config holds persistent defaults for key generation, keyserver choice, and
+the GitHub PAT env var reference. Subcommands that read config (generate,
+publish, github, status, wizard) use its values as defaults; explicit flags
+always override config values.
+
+Security: the config NEVER stores the GitHub PAT value — only the env var name
+that holds it. The file is mode 0600.
+
+Subcommands:
+  keysmith config init   Write a commented template to the config path.
+  keysmith config show   Print the current (loaded or default) config.
+  keysmith config path   Print the config file path.`,
+	Args: cobra.NoArgs,
+}
+
+var configInitCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Write a commented config template to the config path",
+	Long: `Write a commented config.yaml template to the config path (~/.config/gpg-keysmith/config.yaml
+by default, or the path passed via --config). The template explains each field
+and is safe to edit by hand.
+
+Refuses to overwrite an existing file unless --force is given.`,
+	Args: cobra.NoArgs,
+	RunE: runConfigInit,
+}
+
+var configShowCmd = &cobra.Command{
+	Use:   "show",
+	Short: "Print the current config (loaded from the path or defaults)",
+	Long: `Print the current config. If a config.yaml exists at the config path (or the
+path passed via --config), it is loaded and printed. If no file exists, the
+built-in defaults are printed so the user can see what they would get by
+running 'keysmith config init'.`,
+	Args: cobra.NoArgs,
+	RunE: runConfigShow,
+}
+
+var configPathCmd = &cobra.Command{
+	Use:   "path",
+	Short: "Print the config file path",
+	Long:  `Print the config file path that keysmith reads (~/.config/gpg-keysmith/config.yaml by default, or the path passed via --config).`,
+	Args:  cobra.NoArgs,
+	RunE:  runConfigPath,
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show current GPG + GitHub setup state",
@@ -255,6 +327,9 @@ var (
 	wzReset     bool
 )
 
+// config subcommand flags.
+var configInitForce bool
+
 func init() {
 	rootCmd.AddCommand(
 		generateCmd,
@@ -265,7 +340,19 @@ func init() {
 		detectCmd,
 		statusCmd,
 		wizardCmd,
+		configCmd,
 	)
+
+	// --config is a global flag on the root command so every subcommand
+	// can override the default config path. PersistentFlags propagate
+	// to all subcommands.
+	rootCmd.PersistentFlags().StringVar(&configFile, "config", "",
+		"path to the config file (default ~/.config/gpg-keysmith/config.yaml)")
+
+	// config subcommand group.
+	configCmd.AddCommand(configInitCmd, configShowCmd, configPathCmd)
+	configInitCmd.Flags().BoolVar(&configInitForce, "force", false,
+		"overwrite an existing config file")
 
 	generateCmd.Flags().StringVar(&genName, "name", "", "real name for the key's user id")
 	generateCmd.Flags().StringVar(&genEmail, "email", "", "email for the key's user id")
@@ -303,6 +390,72 @@ func init() {
 	githubCmd.Flags().StringVar(&ghToken, "token", "", "GitHub PAT (if empty, read GITHUB_TOKEN or GH_TOKEN env var)")
 	githubCmd.Flags().StringVar(&ghKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
 	githubCmd.Flags().StringVar(&ghPubkeyFile, "pubkey-file", "", "read armored public key from this file instead of calling gpg --export")
+}
+
+// runConfigInit implements 'keysmith config init'. It writes the
+// commented template to the config path, refusing to overwrite an
+// existing file unless --force is given.
+func runConfigInit(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+	path := configFile
+	if path == "" {
+		p, err := config.DefaultPath()
+		if err != nil {
+			return fmt.Errorf("config init: resolve default path: %w", err)
+		}
+		path = p
+	}
+	if err := config.Init(path, configInitForce); err != nil {
+		return fmt.Errorf("config init: %w", err)
+	}
+	fmt.Fprintf(out, "Wrote config template to %s\n", path)
+	fmt.Fprintln(out, "Edit it by hand, then run 'keysmith config show' to verify.")
+	return nil
+}
+
+// runConfigShow implements 'keysmith config show'. It loads the
+// config (or Default if no file exists) and prints it as YAML.
+func runConfigShow(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+	c, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("config show: %w", err)
+	}
+	fmt.Fprintf(out, "# config path: %s\n", resolveConfigPathForShow())
+	data, err := yamlMarshal(c)
+	if err != nil {
+		return fmt.Errorf("config show: marshal: %w", err)
+	}
+	fmt.Fprint(out, string(data))
+	return nil
+}
+
+// runConfigPath implements 'keysmith config path'. It prints the
+// config file path keysmith reads.
+func runConfigPath(cmd *cobra.Command, args []string) error {
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out, resolveConfigPathForShow())
+	return nil
+}
+
+// resolveConfigPathForShow returns the config path that would be
+// loaded — either the --config value or the default path.
+func resolveConfigPathForShow() string {
+	if configFile != "" {
+		return configFile
+	}
+	p, err := config.DefaultPath()
+	if err != nil {
+		return "(unable to resolve default path: " + err.Error() + ")"
+	}
+	return p
+}
+
+// yamlMarshal is a thin wrapper kept in main so the config package
+// stays free of a yaml import that callers must share. It uses the
+// same gopkg.in/yaml.v3 the config package uses.
+func yamlMarshal(c config.Config) ([]byte, error) {
+	return yaml.Marshal(&c)
 }
 
 func runDetect(cmd *cobra.Command, args []string) error {
@@ -345,13 +498,31 @@ func formatExpiry(t time.Time) string {
 func runGenerate(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
+	// Apply config defaults for flags the user did not set explicitly.
+	// Flags always win — we only fall back to config when the flag is
+	// still at its zero value. key-length and expiry are the two
+	// generate flags that have a sensible config default; the rest
+	// (name, email, comment) are per-key and never persisted.
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("generate: load config: %w", err)
+	}
+	keyLength := genKeyLength
+	if !cmd.Flags().Changed("key-length") && cfg.Key.Length > 0 {
+		keyLength = cfg.Key.Length
+	}
+	expiry := genExpiry
+	if !cmd.Flags().Changed("expiry") && cfg.Key.Expire != "" {
+		expiry = cfg.Key.Expire
+	}
+
 	opts := gpg.GenerateOptions{
 		Name:      genName,
 		Email:     genEmail,
 		Comment:   genComment,
 		KeyType:   "RSA",
-		KeyLength: genKeyLength,
-		Expiry:    genExpiry,
+		KeyLength: keyLength,
+		Expiry:    expiry,
 	}
 
 	// Collect missing required fields via survey. If --name and --email
@@ -651,11 +822,21 @@ func nonEmptyOr(s, fallback string) string {
 func runGithub(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
+	// Apply config default for --repo if the user did not set it.
+	repo := ghRepo
+	if !cmd.Flags().Changed("repo") && repo == "" {
+		cfg, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("github: load config: %w", err)
+		}
+		repo = cfg.GitHub.Repo
+	}
+
 	// 1. Resolve repo. Must be "owner/name".
-	if ghRepo == "" {
+	if repo == "" {
 		return fmt.Errorf("github: --repo is required (format owner/name)")
 	}
-	parts := strings.SplitN(ghRepo, "/", 2)
+	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[1], "/") {
 		return fmt.Errorf("github: --repo must be 'owner/name' (got %q)", ghRepo)
 	}
@@ -903,8 +1084,21 @@ func runPublish(cmd *cobra.Command, args []string) error {
 	}
 
 	// 4. Normalise --keyserver (all/openpgp/ubuntu) to the canonical
-	//    keyserver name accepted by keyserver.PublishPubKey.
-	ks, err := normaliseKeyserverFlag(pubKeyserver)
+	//    keyserver name accepted by keyserver.PublishPubKey. If the
+	//    user did not pass --keyserver, fall back to the config's
+	//    preferred keyserver (a single keyserver, not "all", because
+	//    config stores one preferred + one fallback).
+	ksFlag := pubKeyserver
+	if !cmd.Flags().Changed("keyserver") {
+		cfg, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("publish: load config: %w", err)
+		}
+		if cfg.Keyserver.Preferred != "" {
+			ksFlag = cfg.Keyserver.Preferred
+		}
+	}
+	ks, err := normaliseKeyserverFlag(ksFlag)
 	if err != nil {
 		return fmt.Errorf("publish: %w", err)
 	}
@@ -996,14 +1190,39 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(out, "State file cleared. Starting fresh.")
 	}
 
+	// Apply config defaults for flags the user did not set explicitly.
+	// Flags always win; config only fills the gaps.
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("wizard: load config: %w", err)
+	}
+	keyLength := wzKeyLength
+	if !cmd.Flags().Changed("key-length") && cfg.Key.Length > 0 {
+		keyLength = cfg.Key.Length
+	}
+	expiry := wzExpiry
+	if !cmd.Flags().Changed("expiry") && cfg.Key.Expire != "" {
+		expiry = cfg.Key.Expire
+	}
+	keyserver := wzKeyserver
+	if !cmd.Flags().Changed("keyserver") {
+		if cfg.Keyserver.Preferred != "" {
+			keyserver = cfg.Keyserver.Preferred
+		}
+	}
+	repo := wzRepo
+	if !cmd.Flags().Changed("repo") && repo == "" {
+		repo = cfg.GitHub.Repo
+	}
+
 	opts := wizard.WizardOptions{
 		Email:     wzEmail,
 		Name:      wzName,
 		Comment:   wzComment,
-		Repo:      wzRepo,
-		KeyLength: wzKeyLength,
-		Expiry:    wzExpiry,
-		Keyserver: wzKeyserver,
+		Repo:      repo,
+		KeyLength: keyLength,
+		Expiry:    expiry,
+		Keyserver: keyserver,
 		StatePath: statePath,
 		// GitHubToken and Passphrase are intentionally NOT wired from
 		// flags — the wizard collects them via survey.Password so
@@ -1034,10 +1253,29 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		token = os.Getenv("GH_TOKEN")
 	}
 
+	// Apply config defaults for --repo and --keyserver when the user
+	// did not set them. The token is never read from config (config
+	// stores only the env var NAME, not the value) — token resolution
+	// stays on the flag/env precedence.
+	repo := stRepo
+	keyserverVal := stKeyserver
+	if !cmd.Flags().Changed("repo") || !cmd.Flags().Changed("keyserver") {
+		cfg, err := loadConfig()
+		if err != nil {
+			return fmt.Errorf("status: load config: %w", err)
+		}
+		if !cmd.Flags().Changed("repo") && repo == "" {
+			repo = cfg.GitHub.Repo
+		}
+		if !cmd.Flags().Changed("keyserver") && cfg.Keyserver.Preferred != "" {
+			keyserverVal = cfg.Keyserver.Preferred
+		}
+	}
+
 	report := status.CollectStatus(status.StatusOptions{
 		GitHubToken: token,
-		Repo:        stRepo,
-		Keyserver:   stKeyserver,
+		Repo:        repo,
+		Keyserver:   keyserverVal,
 		Fingerprint: stFingerprint,
 	})
 
