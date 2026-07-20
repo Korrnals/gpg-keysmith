@@ -55,6 +55,36 @@ func loadConfig() (config.Config, error) {
 	return config.Load(configFile)
 }
 
+// resolveGitHubToken resolves the GitHub PAT from the environment using
+// the precedence:
+//
+//  1. env var named by cfg.GitHub.TokenEnv (default "GITHUB_TOKEN")
+//  2. GH_TOKEN env var as fallback
+//
+// The token is NEVER read from a flag — a --token flag would leak the
+// PAT via 'ps' and /proc/cmdline (S1). This wires the previously-dead
+// config.TokenEnv field into the real token-resolution path (S5): a
+// user can set config.github.token_env: MY_CUSTOM_TOKEN and the tool
+// will read MY_CUSTOM_TOKEN from the env.
+//
+// Returns an error if both env vars are empty so the caller can show a
+// clear "set GITHUB_TOKEN or GH_TOKEN env var" message. If cfg.GitHub.TokenEnv
+// is empty (config missing or malformed), Default() "GITHUB_TOKEN" is
+// used as the primary env var name.
+func resolveGitHubToken(cfg config.Config) (string, error) {
+	primary := cfg.GitHub.TokenEnv
+	if primary == "" {
+		primary = "GITHUB_TOKEN"
+	}
+	if token := os.Getenv(primary); token != "" {
+		return token, nil
+	}
+	if token := os.Getenv("GH_TOKEN"); token != "" {
+		return token, nil
+	}
+	return "", fmt.Errorf("github: GitHub token required (set %s or GH_TOKEN env var)", primary)
+}
+
 var detectCmd = &cobra.Command{
 	Use:   "detect",
 	Short: "List existing GPG secret keys for the current user",
@@ -126,9 +156,12 @@ admin:repo_hook scopes (for the repo secrets). The 'gh' CLI must be installed
 'gh secret set' to avoid a libsodium native binding dependency.
 
 Token resolution precedence:
-  1. --token flag
-  2. GITHUB_TOKEN env var
-  3. GH_TOKEN env var
+  1. env var named by config.github.token_env (default GITHUB_TOKEN)
+  2. GH_TOKEN env var as fallback
+
+The token is NEVER read from a flag — a --token flag would leak via 'ps'
+and /proc/cmdline. Passphrase uses stdin for the same reason; the two
+must stay symmetric.
 
 If --keyid is empty, the key is picked interactively from 'gpg --list-secret-keys'.
 If --pubkey-file is set, the armored public key is read from that file instead
@@ -140,7 +173,6 @@ of calling gpg --export.`,
 // github command flags.
 var (
 	ghRepo       string
-	ghToken      string
 	ghKeyID      string
 	ghPubkeyFile string
 )
@@ -273,9 +305,11 @@ Five checks are performed:
 Each check emits a one-line remediation hint when it is not green.
 
 Token resolution precedence:
-  1. --token flag
-  2. GITHUB_TOKEN env var
-  3. GH_TOKEN env var
+  1. env var named by config.github.token_env (default GITHUB_TOKEN)
+  2. GH_TOKEN env var as fallback
+
+The token is NEVER read from a flag — a --token flag would leak via 'ps'
+and /proc/cmdline.
 
 If --repo is omitted, the repo-secrets check degrades to ⚠️.`,
 	Args: cobra.NoArgs,
@@ -285,7 +319,6 @@ If --repo is omitted, the repo-secrets check degrades to ⚠️.`,
 // status command flags.
 var (
 	stRepo        string
-	stToken       string
 	stKeyserver   string
 	stFingerprint string
 )
@@ -383,11 +416,9 @@ func init() {
 	publishCmd.Flags().StringVar(&pubKeyserver, "keyserver", "all", "keyserver target: all (default), openpgp, or ubuntu")
 	publishCmd.Flags().StringVar(&pubPubkeyFile, "pubkey-file", "", "read armored public key from this file instead of calling gpg --export")
 	statusCmd.Flags().StringVar(&stRepo, "repo", "", "target repo as owner/name (optional — secrets check degrades to ⚠️ if omitted)")
-	statusCmd.Flags().StringVar(&stToken, "token", "", "GitHub PAT (if empty, read GITHUB_TOKEN or GH_TOKEN env var)")
 	statusCmd.Flags().StringVar(&stKeyserver, "keyserver", "keys.openpgp.org", "keyserver to check for key publication")
 	statusCmd.Flags().StringVar(&stFingerprint, "fingerprint", "", "GPG key fingerprint (optional — derived from first key if empty)")
 	githubCmd.Flags().StringVar(&ghRepo, "repo", "", "target repo as owner/name (required)")
-	githubCmd.Flags().StringVar(&ghToken, "token", "", "GitHub PAT (if empty, read GITHUB_TOKEN or GH_TOKEN env var)")
 	githubCmd.Flags().StringVar(&ghKeyID, "keyid", "", "GPG key id to export (if empty, pick interactively from detect)")
 	githubCmd.Flags().StringVar(&ghPubkeyFile, "pubkey-file", "", "read armored public key from this file instead of calling gpg --export")
 }
@@ -801,7 +832,7 @@ func nonEmptyOr(s, fallback string) string {
 
 // runGithub implements the 'github' subcommand. It:
 //  1. Resolves the target repo (owner/name) from --repo.
-//  2. Resolves the GitHub token (--token > GITHUB_TOKEN > GH_TOKEN).
+//  2. Resolves the GitHub token (env var named by config.github.token_env, then GH_TOKEN).
 //  3. Resolves the GPG key id (--keyid > interactive pick from detect).
 //  4. Obtains the armored public key (--pubkey-file > gpg.ExportPublicKey).
 //  5. Looks up the fingerprint for the chosen key (for dedup).
@@ -818,17 +849,21 @@ func nonEmptyOr(s, fallback string) string {
 //
 // Security: token, private key, and passphrase are NEVER logged,
 // printed, or written to disk. Error messages use <REDACTED> for
-// secret values.
+// secret values. The token is never read from a flag (S1) — env-only
+// resolution avoids leaking the PAT via 'ps' and /proc/cmdline.
 func runGithub(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
+
+	// Load config once — used for both --repo default and token-env
+	// name resolution.
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("github: load config: %w", err)
+	}
 
 	// Apply config default for --repo if the user did not set it.
 	repo := ghRepo
 	if !cmd.Flags().Changed("repo") && repo == "" {
-		cfg, err := loadConfig()
-		if err != nil {
-			return fmt.Errorf("github: load config: %w", err)
-		}
 		repo = cfg.GitHub.Repo
 	}
 
@@ -842,16 +877,12 @@ func runGithub(cmd *cobra.Command, args []string) error {
 	}
 	owner, repo := parts[0], parts[1]
 
-	// 2. Resolve token. --token > GITHUB_TOKEN > GH_TOKEN.
-	token := ghToken
-	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
-	}
-	if token == "" {
-		token = os.Getenv("GH_TOKEN")
-	}
-	if token == "" {
-		return fmt.Errorf("github: GitHub token required (set GITHUB_TOKEN env or pass --token)")
+	// 2. Resolve token from the env var named by config.github.token_env
+	// (default GITHUB_TOKEN), then GH_TOKEN as fallback. The token is
+	// NEVER read from a flag — a --token flag would leak via ps/proc.
+	token, err := resolveGitHubToken(cfg)
+	if err != nil {
+		return err
 	}
 
 	// 3. Resolve key id. --keyid > interactive pick from detect.
@@ -1227,7 +1258,10 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		// GitHubToken and Passphrase are intentionally NOT wired from
 		// flags — the wizard collects them via survey.Password so
 		// they never leak via shell history / ps. The github step
-		// also reads GITHUB_TOKEN / GH_TOKEN env vars.
+		// resolves the token from the env var named by
+		// GitHubTokenEnv (config.github.token_env, default
+		// GITHUB_TOKEN), then GH_TOKEN, then a masked prompt (S1/S5).
+		GitHubTokenEnv: cfg.GitHub.TokenEnv,
 	}
 
 	fmt.Fprintln(out, "Starting gpg-keysmith wizard...")
@@ -1245,31 +1279,38 @@ func runWizard(cmd *cobra.Command, args []string) error {
 func runStatus(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 
-	token := stToken
-	if token == "" {
-		token = os.Getenv("GITHUB_TOKEN")
+	// Load config once — used for --repo/--keyserver defaults and
+	// token-env name resolution.
+	cfg, err := loadConfig()
+	if err != nil {
+		return fmt.Errorf("status: load config: %w", err)
 	}
-	if token == "" {
-		token = os.Getenv("GH_TOKEN")
+
+	// Resolve token from the env var named by config.github.token_env
+	// (default GITHUB_TOKEN), then GH_TOKEN as fallback. The token is
+	// NEVER read from a flag — env-only resolution avoids leaking the
+	// PAT via 'ps' and /proc/cmdline (S1).
+	token, err := resolveGitHubToken(cfg)
+	if err != nil {
+		// status degrades to ⚠️ on missing token rather than failing,
+		// so an absent token is not a hard error here. resolveGitHubToken
+		// returns an error only when both env vars are empty; we keep
+		// the token empty and let CollectStatus emit the ⚠️ rows.
+		token = ""
+		_ = err
 	}
 
 	// Apply config defaults for --repo and --keyserver when the user
-	// did not set them. The token is never read from config (config
-	// stores only the env var NAME, not the value) — token resolution
-	// stays on the flag/env precedence.
+	// did not set them.
 	repo := stRepo
 	keyserverVal := stKeyserver
-	if !cmd.Flags().Changed("repo") || !cmd.Flags().Changed("keyserver") {
-		cfg, err := loadConfig()
-		if err != nil {
-			return fmt.Errorf("status: load config: %w", err)
-		}
-		if !cmd.Flags().Changed("repo") && repo == "" {
+	if !cmd.Flags().Changed("repo") {
+		if repo == "" {
 			repo = cfg.GitHub.Repo
 		}
-		if !cmd.Flags().Changed("keyserver") && cfg.Keyserver.Preferred != "" {
-			keyserverVal = cfg.Keyserver.Preferred
-		}
+	}
+	if !cmd.Flags().Changed("keyserver") && cfg.Keyserver.Preferred != "" {
+		keyserverVal = cfg.Keyserver.Preferred
 	}
 
 	report := status.CollectStatus(status.StatusOptions{

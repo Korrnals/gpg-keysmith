@@ -18,7 +18,10 @@ func TestBuildBatchFile_ContainsExpectedFields(t *testing.T) {
 		Expiry:     "0",
 		Passphrase: "<REDACTED>", // not used by buildBatchFile, set for realism
 	}
-	batch := buildBatchFile(opts)
+	batch, err := buildBatchFile(opts)
+	if err != nil {
+		t.Fatalf("buildBatchFile: %v", err)
+	}
 
 	checks := []struct {
 		name string
@@ -56,7 +59,10 @@ func TestBuildBatchFile_NoNoProtection(t *testing.T) {
 		Expiry:     "0",
 		Passphrase: "<REDACTED>",
 	}
-	batch := buildBatchFile(opts)
+	batch, err := buildBatchFile(opts)
+	if err != nil {
+		t.Fatalf("buildBatchFile: %v", err)
+	}
 	if strings.Contains(batch, "%no-protection") {
 		t.Errorf("batch must NOT contain %%no-protection (creates unprotected key)\n--- batch ---\n%s", batch)
 	}
@@ -75,7 +81,10 @@ func TestBuildBatchFile_OmitsCommentWhenEmpty(t *testing.T) {
 		Expiry:     "0",
 		Passphrase: "<REDACTED>",
 	}
-	batch := buildBatchFile(opts)
+	batch, err := buildBatchFile(opts)
+	if err != nil {
+		t.Fatalf("buildBatchFile: %v", err)
+	}
 	if strings.Contains(batch, "Name-Comment:") {
 		t.Errorf("batch must NOT contain Name-Comment when Comment is empty\n--- batch ---\n%s", batch)
 	}
@@ -94,7 +103,10 @@ func TestBuildBatchFile_NoPassphraseInBatch(t *testing.T) {
 		Expiry:     "0",
 		Passphrase: "super-secret-passphrase-12345",
 	}
-	batch := buildBatchFile(opts)
+	batch, err := buildBatchFile(opts)
+	if err != nil {
+		t.Fatalf("buildBatchFile: %v", err)
+	}
 	if strings.Contains(batch, opts.Passphrase) {
 		t.Errorf("batch must NOT contain the passphrase (it goes via stdin, not the batch)\n--- batch ---\n%s", batch)
 	}

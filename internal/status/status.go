@@ -16,6 +16,7 @@ import (
 	"github.com/Korrnals/gpg-keysmith/internal/git"
 	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
+	ks "github.com/Korrnals/gpg-keysmith/internal/keyserver"
 )
 
 // Status indicator constants used in CheckResult.Status.
@@ -293,6 +294,17 @@ func checkKeyserver(fingerprint, keyserver string) CheckResult {
 			Status: StatusWarn,
 			Detail: "no GPG key to check",
 			Hint:   "Run 'keysmith generate' first",
+		}
+	}
+	// Validate the fingerprint before it is interpolated into the
+	// keyserver lookup URL — a malformed value could inject path or
+	// query segments. This reuses keyserver.ValidateFingerprint so the
+	// status check and the publish path share one validator.
+	if err := ks.ValidateFingerprint(fingerprint); err != nil {
+		return CheckResult{
+			Status: StatusFail,
+			Detail: fmt.Sprintf("invalid fingerprint: %v", err),
+			Hint:   "Pass a 40-char hex fingerprint via --fingerprint",
 		}
 	}
 	urlStr := keyserverLookupURL(keyserver, fingerprint)

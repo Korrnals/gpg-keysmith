@@ -41,7 +41,34 @@ type GenerateOptions struct {
 // is piped via stdin to gpg --pinentry-mode loopback, never written to
 // the batch file. The %no-protection directive is deliberately absent:
 // it would create an unprotected key, which this tool never does.
-func buildBatchFile(opts GenerateOptions) string {
+//
+// buildBatchFile validates its string inputs via validateBatchInput
+// before interpolating them into the batch directives. This rejects
+// newline/control-char injection (a '\n' in Name would let a malicious
+// or mistyped value start a new gpg directive). Callers that already
+// validated (e.g. GenerateKey) can ignore the returned error is nil.
+func buildBatchFile(opts GenerateOptions) (string, error) {
+	if err := validateBatchInput(opts.Name); err != nil {
+		return "", fmt.Errorf("gpg generate: field Name contains newline or control char (injection risk): %w", err)
+	}
+	if err := validateBatchInput(opts.Email); err != nil {
+		return "", fmt.Errorf("gpg generate: field Email contains newline or control char (injection risk): %w", err)
+	}
+	if opts.Comment != "" {
+		if err := validateBatchInput(opts.Comment); err != nil {
+			return "", fmt.Errorf("gpg generate: field Comment contains newline or control char (injection risk): %w", err)
+		}
+	}
+	if err := validateBatchInput(opts.Expiry); err != nil {
+		return "", fmt.Errorf("gpg generate: field Expiry contains newline or control char (injection risk): %w", err)
+	}
+	if err := validateBatchInput(opts.KeyType); err != nil {
+		return "", fmt.Errorf("gpg generate: field KeyType contains newline or control char (injection risk): %w", err)
+	}
+	if err := validateKeyLength(opts.KeyLength); err != nil {
+		return "", err
+	}
+
 	var b strings.Builder
 	fmt.Fprintf(&b, "%%echo Generating a key for %s\n", opts.Email)
 	fmt.Fprintf(&b, "Key-Type: %s\n", opts.KeyType)
@@ -56,7 +83,44 @@ func buildBatchFile(opts GenerateOptions) string {
 	fmt.Fprintf(&b, "Expire-Date: %s\n", opts.Expiry)
 	b.WriteString("%commit\n")
 	b.WriteString("%echo done\n")
-	return b.String()
+	return b.String(), nil
+}
+
+// validateBatchInput rejects any newline, carriage return, or other
+// control character (except tab) in a string that will be interpolated
+// into a gpg batch directive. A '\n' in Name-Real would let a malicious
+// value start a new directive (e.g. "Alice\nPassphrase: ..."), so every
+// user-supplied batch field is validated before it reaches the file.
+//
+// Tab is allowed because gpg treats it as whitespace inside a value
+// and it does not start a new directive.
+func validateBatchInput(s string) error {
+	for _, r := range s {
+		// Allow printable runes and tab. Reject \n, \r, \v, \f, and
+		// any other control char (\x00-\x1F minus tab, plus \x7F).
+		if r == '\t' {
+			continue
+		}
+		if r < 0x20 || r == 0x7F {
+			return fmt.Errorf("control character 0x%02X in input", r)
+		}
+	}
+	return nil
+}
+
+// validateKeyLength rejects a key length outside [1024, 8192]. 0
+// (unset, then defaulted) is allowed because GenerateKey applies the
+// 4096 default before calling buildBatchFile — but buildBatchFile
+// defends against a caller that bypasses GenerateKey with an absurd
+// value like 1 or 1000000. The range matches gpg's own RSA limits.
+func validateKeyLength(n int) error {
+	if n == 0 {
+		return nil
+	}
+	if n < 1024 || n > 8192 {
+		return fmt.Errorf("gpg generate: key length must be in [1024, 8192], got %d", n)
+	}
+	return nil
 }
 
 // GenerateKey drives 'gpg --gen-key' with a batch parameter file and
@@ -89,7 +153,10 @@ func GenerateKey(opts GenerateOptions) (keyID string, err error) {
 		opts.Expiry = "0"
 	}
 
-	batch := buildBatchFile(opts)
+	batch, err := buildBatchFile(opts)
+	if err != nil {
+		return "", err
+	}
 
 	// Create the temp batch file with 0600 perms — it contains the
 	// user's name and email (PII), not the passphrase, but still must

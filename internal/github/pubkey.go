@@ -84,25 +84,18 @@ func UploadPublicKeyWithClient(token, armoredPubKey string, c Doer) (string, err
 		c = defaultHTTPClient
 	}
 
-	// Detect existing keys first — GitHub rejects duplicate GPG key
-	// uploads with 422, but comparing fingerprints ourselves gives a
-	// cleaner "already present" path and lets us return the existing
-	// fingerprint without retrying.
+	// Detect existing keys first. The dedup-by-fingerprint path
+	// lives in UploadPublicKeyWithFingerprint (the caller-friendly
+	// form). UploadPublicKey itself does not dedup — on a 422 it
+	// returns an error pointing the caller at the
+	// fingerprint-matching variant, because returning the first
+	// existing key's fingerprint as a guess silently hides which
+	// key the caller actually intended.
 	existing, err := listUserGpgKeys(token, c)
 	if err != nil {
 		return "", fmt.Errorf("github: list existing GPG keys: %w", err)
 	}
-	// If the caller knows the fingerprint, pass it via the armored key
-	// content's trailing comment line. We do not parse the armor here
-	// (no PGP parser in gpg-keysmith); instead we rely on GitHub's own
-	// dedup via 422. For the dedup-by-fingerprint short-circuit, the
-	// caller (cmd/keysmith) passes the fingerprint separately via
-	// UploadPublicKeyWithFingerprint.
-	for _, k := range existing {
-		// Without a local fingerprint match we cannot short-circuit
-		// here; fall through to the upload and let GitHub dedup.
-		_ = k
-	}
+	_ = existing
 
 	body, err := json.Marshal(struct {
 		ArmoredPublicKey string `json:"armored_public_key"`
@@ -124,17 +117,14 @@ func UploadPublicKeyWithClient(token, armoredPubKey string, c Doer) (string, err
 	// 422 from /user/gpg_keys means the key is already uploaded.
 	// GitHub returns a body like
 	//   {"message": "Validation Failed", "errors": [...]}
-	// We treat 422 as "already present" and try to return the
-	// matching fingerprint from the existing-keys list.
+	// We do NOT return the first existing key's fingerprint — without
+	// a local fingerprint match we cannot tell which key the caller
+	// intended, and returning a guess silently hides a real problem.
+	// Callers that want "upload or get existing" semantics MUST use
+	// UploadPublicKeyWithFingerprint, which matches by fingerprint
+	// and returns the correct existing key.
 	if resp.StatusCode == http.StatusUnprocessableEntity {
-		for _, k := range existing {
-			// We have no local fingerprint match; return the first
-			// existing key's fingerprint as the best approximation.
-			// The caller usually passes a known fingerprint via the
-			// wrapper, which is the cleaner path.
-			return k.Fingerprint, nil
-		}
-		return "", fmt.Errorf("github: upload public key: GitHub returned 422 (key may already exist) but no existing key fingerprint was available")
+		return "", fmt.Errorf("github: a GPG key is already uploaded for this user, but the fingerprint could not be matched automatically; call UploadPublicKeyWithFingerprint with the explicit fingerprint")
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
