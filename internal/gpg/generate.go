@@ -168,20 +168,20 @@ func GenerateKey(opts GenerateOptions) (keyID string, err error) {
 	}
 	tmpName := tmp.Name()
 	if err := os.Chmod(tmpName, 0o600); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("gpg generate: chmod batch file: %w", err)
 	}
 	if _, err := tmp.WriteString(batch); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("gpg generate: write batch file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
+		_ = os.Remove(tmpName)
 		return "", fmt.Errorf("gpg generate: close batch file: %w", err)
 	}
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 
 	// --passphrase-fd 0 tells gpg to read the passphrase from stdin
 	// (fd 0). This avoids leaking the passphrase via the process arg

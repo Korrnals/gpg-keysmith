@@ -199,7 +199,7 @@ func ListRepoSecretsWithClient(token, owner, repo string, c Doer) ([]string, err
 	if err != nil {
 		return nil, fmt.Errorf("github: list repo secrets: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("github: list repo secrets: GitHub API returned status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))

@@ -324,17 +324,17 @@ func checkKeyserver(fingerprint, keyserver string) CheckResult {
 			Hint:   "Check your network connection",
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	// Drain the body so the connection can be reused.
 	_, _ = io.Copy(io.Discard, resp.Body)
 
-	switch {
-	case resp.StatusCode == http.StatusOK:
+	switch resp.StatusCode {
+	case http.StatusOK:
 		return CheckResult{
 			Status: StatusOK,
 			Detail: fmt.Sprintf("published (%s)", keyserver),
 		}
-	case resp.StatusCode == http.StatusNotFound:
+	case http.StatusNotFound:
 		return CheckResult{
 			Status: StatusFail,
 			Detail: fmt.Sprintf("not found on %s", keyserver),

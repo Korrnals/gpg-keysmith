@@ -112,7 +112,7 @@ func UploadPublicKeyWithClient(token, armoredPubKey string, c Doer) (string, err
 	if err != nil {
 		return "", fmt.Errorf("github: upload public key: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// 422 from /user/gpg_keys means the key is already uploaded.
 	// GitHub returns a body like
@@ -191,7 +191,7 @@ func UploadPublicKeyWithFingerprintAndClient(token, armoredPubKey, fingerprint s
 	if err != nil {
 		return "", fmt.Errorf("github: upload public key: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: upload public key: GitHub API returned status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
@@ -236,7 +236,7 @@ func listUserGpgKeys(token string, c Doer) ([]GpgKeyRef, error) {
 	if err != nil {
 		return nil, fmt.Errorf("github: list GPG keys: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("github: list GPG keys: GitHub API returned status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))

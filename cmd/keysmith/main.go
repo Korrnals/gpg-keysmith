@@ -439,8 +439,8 @@ func runConfigInit(cmd *cobra.Command, args []string) error {
 	if err := config.Init(path, configInitForce); err != nil {
 		return fmt.Errorf("config init: %w", err)
 	}
-	fmt.Fprintf(out, "Wrote config template to %s\n", path)
-	fmt.Fprintln(out, "Edit it by hand, then run 'keysmith config show' to verify.")
+	_, _ = fmt.Fprintf(out, "Wrote config template to %s\n", path)
+	_, _ = fmt.Fprintln(out, "Edit it by hand, then run 'keysmith config show' to verify.")
 	return nil
 }
 
@@ -452,12 +452,12 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("config show: %w", err)
 	}
-	fmt.Fprintf(out, "# config path: %s\n", resolveConfigPathForShow())
+	_, _ = fmt.Fprintf(out, "# config path: %s\n", resolveConfigPathForShow())
 	data, err := yamlMarshal(c)
 	if err != nil {
 		return fmt.Errorf("config show: marshal: %w", err)
 	}
-	fmt.Fprint(out, string(data))
+	_, _ = fmt.Fprint(out, string(data))
 	return nil
 }
 
@@ -465,7 +465,7 @@ func runConfigShow(cmd *cobra.Command, args []string) error {
 // config file path keysmith reads.
 func runConfigPath(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
-	fmt.Fprintln(out, resolveConfigPathForShow())
+	_, _ = fmt.Fprintln(out, resolveConfigPathForShow())
 	return nil
 }
 
@@ -496,14 +496,14 @@ func runDetect(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("detect: %w", err)
 	}
 	if len(keys) == 0 {
-		fmt.Fprintln(out, "No GPG keys found. Run 'gpg-keysmith generate' to create one.")
+		_, _ = fmt.Fprintln(out, "No GPG keys found. Run 'gpg-keysmith generate' to create one.")
 		return nil
 	}
-	fmt.Fprintf(out, "Found %d GPG key(s):\n\n", len(keys))
+	_, _ = fmt.Fprintf(out, "Found %d GPG key(s):\n\n", len(keys))
 	tw := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "  KEY ID\tTYPE\tCREATED\tEXPIRES\tUSER ID")
+	_, _ = fmt.Fprintln(tw, "  KEY ID\tTYPE\tCREATED\tEXPIRES\tUSER ID")
 	for _, k := range keys {
-		fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n",
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n",
 			k.KeyID,
 			k.Type,
 			k.Created.Format("2006-01-02 15:04"),
@@ -593,8 +593,8 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("generate: %w", err)
 	}
-	fmt.Fprintf(out, "Generated new GPG key: %s\n", keyID)
-	fmt.Fprintln(out, "Run 'keysmith detect' to verify.")
+	_, _ = fmt.Fprintf(out, "Generated new GPG key: %s\n", keyID)
+	_, _ = fmt.Fprintln(out, "Run 'keysmith detect' to verify.")
 	return nil
 }
 
@@ -624,7 +624,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("export: no GPG key found for email %q", expEmail)
 			}
 			keyID = key.KeyID
-			fmt.Fprintf(out, "Resolved key id %s for email %s\n", keyID, expEmail)
+			_, _ = fmt.Fprintf(out, "Resolved key id %s for email %s\n", keyID, expEmail)
 		}
 	}
 	if keyID == "" {
@@ -676,7 +676,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	if err := os.WriteFile(expPubkey, []byte(pubArmor), 0o644); err != nil {
 		return fmt.Errorf("export: write public key to %s: %w", expPubkey, err)
 	}
-	fmt.Fprintf(out, "Public key written to %s\n", expPubkey)
+	_, _ = fmt.Fprintf(out, "Public key written to %s\n", expPubkey)
 
 	// Capture the private key in memory ONLY — never written to disk,
 	// never logged, never printed. For M4 it is simply captured; M6
@@ -715,16 +715,16 @@ func runExport(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Exported public key:\n")
-	fmt.Fprintf(out, "  Key id:      %s\n", keyID)
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Exported public key:\n")
+	_, _ = fmt.Fprintf(out, "  Key id:      %s\n", keyID)
 	if fingerprint != "" {
-		fmt.Fprintf(out, "  Fingerprint: %s\n", fingerprint)
+		_, _ = fmt.Fprintf(out, "  Fingerprint: %s\n", fingerprint)
 	}
-	fmt.Fprintf(out, "  Public key:  %s\n", expPubkey)
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Private key captured in memory (not written to disk) —")
-	fmt.Fprintln(out, "will be used by 'github' command in M6.")
+	_, _ = fmt.Fprintf(out, "  Public key:  %s\n", expPubkey)
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Private key captured in memory (not written to disk) —")
+	_, _ = fmt.Fprintln(out, "will be used by 'github' command in M6.")
 	return nil
 }
 
@@ -756,7 +756,7 @@ func runGitConfig(cmd *cobra.Command, args []string) error {
 		}
 		if existing != "" {
 			keyID = existing
-			fmt.Fprintf(out, "Reusing existing user.signingkey: %s\n", keyID)
+			_, _ = fmt.Fprintf(out, "Reusing existing user.signingkey: %s\n", keyID)
 		}
 	}
 
@@ -807,17 +807,17 @@ func runGitConfig(cmd *cobra.Command, args []string) error {
 	if gcGlobal {
 		scope = "global user config"
 	}
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "Git signing configured (%s):\n", scope)
-	fmt.Fprintf(out, "  user.name         = %s\n", nonEmptyOr(gcName, "(kept existing)"))
-	fmt.Fprintf(out, "  user.email        = %s\n", nonEmptyOr(gcEmail, "(kept existing)"))
-	fmt.Fprintf(out, "  user.signingkey   = %s\n", keyID)
-	fmt.Fprintf(out, "  commit.gpgsign    = true\n")
-	fmt.Fprintf(out, "  gpg.format        = openpgp\n")
-	fmt.Fprintf(out, "  tag.gpgsign       = true\n")
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "Verify with: git config --local --list | grep -E 'gpg|signingkey'")
-	fmt.Fprintln(out, "Test a signed commit: git commit -S --allow-empty -m test && git verify-commit HEAD")
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Git signing configured (%s):\n", scope)
+	_, _ = fmt.Fprintf(out, "  user.name         = %s\n", nonEmptyOr(gcName, "(kept existing)"))
+	_, _ = fmt.Fprintf(out, "  user.email        = %s\n", nonEmptyOr(gcEmail, "(kept existing)"))
+	_, _ = fmt.Fprintf(out, "  user.signingkey   = %s\n", keyID)
+	_, _ = fmt.Fprintf(out, "  commit.gpgsign    = true\n")
+	_, _ = fmt.Fprintf(out, "  gpg.format        = openpgp\n")
+	_, _ = fmt.Fprintf(out, "  tag.gpgsign       = true\n")
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Verify with: git config --local --list | grep -E 'gpg|signingkey'")
+	_, _ = fmt.Fprintln(out, "Test a signed commit: git commit -S --allow-empty -m test && git verify-commit HEAD")
 	return nil
 }
 
@@ -971,8 +971,8 @@ func runGithub(cmd *cobra.Command, args []string) error {
 	// 8. Upload the public key to GitHub. If a key with the same
 	// fingerprint is already present, the upload is skipped and the
 	// existing fingerprint is returned.
-	fmt.Fprintln(out)
-	fmt.Fprintln(out, "==> Uploading public key to GitHub...")
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "==> Uploading public key to GitHub...")
 	uploadedFP, err = github.UploadPublicKeyWithFingerprint(token, pubArmor, fingerprint)
 	if err != nil {
 		// Report what we have so far and stop — the user needs to
@@ -985,20 +985,20 @@ func runGithub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("github: upload public key: %w", err)
 	}
 	didUploadPubkey = true
-	fmt.Fprintf(out, "    Public key uploaded (fingerprint: %s)\n", uploadedFP)
+	_, _ = fmt.Fprintf(out, "    Public key uploaded (fingerprint: %s)\n", uploadedFP)
 
 	// 9. Set GPG_PRIVATE_KEY and GPG_PASSPHRASE repo secrets via gh CLI.
-	fmt.Fprintln(out, "==> Setting repo secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE...")
+	_, _ = fmt.Fprintln(out, "==> Setting repo secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE...")
 	if err := github.SetGPGSecrets(token, owner, repo, privArmor, passphrase); err != nil {
 		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
 			didSetSecrets, didOpenPR, prURL)
 		return fmt.Errorf("github: set repo secrets: %w", err)
 	}
 	didSetSecrets = true
-	fmt.Fprintln(out, "    Secrets set: GPG_PRIVATE_KEY, GPG_PASSPHRASE")
+	_, _ = fmt.Fprintln(out, "    Secrets set: GPG_PRIVATE_KEY, GPG_PASSPHRASE")
 
 	// 10. Commit gpg-public-key.asc and open a PR.
-	fmt.Fprintln(out, "==> Committing gpg-public-key.asc and opening PR...")
+	_, _ = fmt.Fprintln(out, "==> Committing gpg-public-key.asc and opening PR...")
 	prURL, err = github.CommitPublicKeyFile(token, owner, repo, pubArmor)
 	if err != nil {
 		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
@@ -1006,7 +1006,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("github: commit + open PR: %w", err)
 	}
 	didOpenPR = true
-	fmt.Fprintf(out, "    PR opened: %s\n", prURL)
+	_, _ = fmt.Fprintf(out, "    PR opened: %s\n", prURL)
 
 	// Final summary.
 	printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
@@ -1022,25 +1022,25 @@ func runGithub(cmd *cobra.Command, args []string) error {
 func printGithubSummary(out io.Writer, owner, repo string,
 	didUploadPubkey bool, fingerprint string,
 	didSetSecrets bool, didOpenPR bool, prURL string) {
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "GitHub setup summary for %s/%s:\n", owner, repo)
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "GitHub setup summary for %s/%s:\n", owner, repo)
 	mark := func(ok bool) string {
 		if ok {
 			return "✅"
 		}
 		return "❌"
 	}
-	fmt.Fprintf(out, "  %s Public key uploaded to GitHub user account", mark(didUploadPubkey))
+	_, _ = fmt.Fprintf(out, "  %s Public key uploaded to GitHub user account", mark(didUploadPubkey))
 	if didUploadPubkey && fingerprint != "" {
-		fmt.Fprintf(out, " (fingerprint: %s)", fingerprint)
+		_, _ = fmt.Fprintf(out, " (fingerprint: %s)", fingerprint)
 	}
-	fmt.Fprintln(out)
-	fmt.Fprintf(out, "  %s Repo secrets set (GPG_PRIVATE_KEY, GPG_PASSPHRASE)\n", mark(didSetSecrets))
-	fmt.Fprintf(out, "  %s PR opened with gpg-public-key.asc", mark(didOpenPR))
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "  %s Repo secrets set (GPG_PRIVATE_KEY, GPG_PASSPHRASE)\n", mark(didSetSecrets))
+	_, _ = fmt.Fprintf(out, "  %s PR opened with gpg-public-key.asc", mark(didOpenPR))
 	if didOpenPR && prURL != "" {
-		fmt.Fprintf(out, ": %s", prURL)
+		_, _ = fmt.Fprintf(out, ": %s", prURL)
 	}
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out)
 }
 
 // runPublish implements the 'publish' subcommand. It:
@@ -1135,7 +1135,7 @@ func runPublish(cmd *cobra.Command, args []string) error {
 	}
 
 	// 5. Publish.
-	fmt.Fprintf(out, "Publishing public key %s to %s...\n", keyID, ks)
+	_, _ = fmt.Fprintf(out, "Publishing public key %s to %s...\n", keyID, ks)
 	results, err := keyserver.PublishPubKey(keyserver.PublishOptions{
 		ArmoredPubKey: pubArmor,
 		Keyserver:     ks,
@@ -1148,7 +1148,7 @@ func runPublish(cmd *cobra.Command, args []string) error {
 	// Print per-keyserver results. A per-keyserver failure is shown
 	// but does not abort the loop — we want the user to see the state
 	// of every keyserver we contacted.
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out)
 	anySuccess := false
 	for _, r := range results {
 		mark := "❌"
@@ -1156,14 +1156,14 @@ func runPublish(cmd *cobra.Command, args []string) error {
 			mark = "✅"
 			anySuccess = true
 		}
-		fmt.Fprintf(out, "  %s %s", mark, r.Keyserver)
+		_, _ = fmt.Fprintf(out, "  %s %s", mark, r.Keyserver)
 		if r.URL != "" {
-			fmt.Fprintf(out, " — %s", r.URL)
+			_, _ = fmt.Fprintf(out, " — %s", r.URL)
 		}
 		if r.Err != nil {
-			fmt.Fprintf(out, "\n      %v", r.Err)
+			_, _ = fmt.Fprintf(out, "\n      %v", r.Err)
 		}
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out)
 	}
 
 	if !anySuccess {
@@ -1218,7 +1218,7 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		if err := wizard.ClearState(statePath); err != nil {
 			return fmt.Errorf("wizard: --reset: %w", err)
 		}
-		fmt.Fprintln(out, "State file cleared. Starting fresh.")
+		_, _ = fmt.Fprintln(out, "State file cleared. Starting fresh.")
 	}
 
 	// Apply config defaults for flags the user did not set explicitly.
@@ -1264,9 +1264,9 @@ func runWizard(cmd *cobra.Command, args []string) error {
 		GitHubTokenEnv: cfg.GitHub.TokenEnv,
 	}
 
-	fmt.Fprintln(out, "Starting gpg-keysmith wizard...")
-	fmt.Fprintln(out, "State file:", statePath)
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Starting gpg-keysmith wizard...")
+	_, _ = fmt.Fprintln(out, "State file:", statePath)
+	_, _ = fmt.Fprintln(out)
 	if err := wizard.RunWizard(opts); err != nil {
 		return fmt.Errorf("wizard: %w", err)
 	}
@@ -1333,9 +1333,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	tw := tabwriter.NewWriter(out, 2, 4, 2, ' ', 0)
 	for _, r := range rows {
-		fmt.Fprintf(tw, "  %s\t%s\t%s\n", r.label, r.cr.Status, r.cr.Detail)
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\n", r.label, r.cr.Status, r.cr.Detail)
 		if r.cr.Hint != "" {
-			fmt.Fprintf(tw, "  \t\t→ %s\n", r.cr.Hint)
+			_, _ = fmt.Fprintf(tw, "  \t\t→ %s\n", r.cr.Hint)
 		}
 	}
 	return tw.Flush()

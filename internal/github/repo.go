@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -159,7 +158,7 @@ func getDefaultBranch(token, owner, repo string, c Doer) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("github: get repo: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: get repo: status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
@@ -179,6 +178,9 @@ func getDefaultBranch(token, owner, repo string, c Doer) (string, error) {
 // getBranchHeadSHA returns the SHA of the HEAD commit of the given
 // branch via GET /repos/{owner}/{repo}/branches/{branch}.
 func getBranchHeadSHA(token, owner, repo, branch string, c Doer) (string, error) {
+	if err := validateBranch(branch); err != nil {
+		return "", err
+	}
 	path, err := reposPath(owner, repo, "/branches/"+branch)
 	if err != nil {
 		return "", err
@@ -191,7 +193,7 @@ func getBranchHeadSHA(token, owner, repo, branch string, c Doer) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("github: get branch %s: HTTP request failed: %w", branch, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: get branch %s: status %d: %s",
 			branch, resp.StatusCode, truncateForError(resp.Body))
@@ -225,7 +227,7 @@ func getCommitTreeSHA(token, owner, repo, commitSHA string, c Doer) (string, err
 	if err != nil {
 		return "", fmt.Errorf("github: get commit %s: HTTP request failed: %w", commitSHA, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: get commit %s: status %d: %s",
 			commitSHA, resp.StatusCode, truncateForError(resp.Body))
@@ -267,7 +269,7 @@ func createBlob(token, owner, repo, content string, c Doer) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("github: create blob: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: create blob: status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
@@ -317,7 +319,7 @@ func createTree(token, owner, repo, baseTreeSHA, filePath, blobSHA string, c Doe
 	if err != nil {
 		return "", fmt.Errorf("github: create tree: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: create tree: status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
@@ -358,7 +360,7 @@ func createCommit(token, owner, repo, message, treeSHA string, parents []string,
 	if err != nil {
 		return "", fmt.Errorf("github: create commit: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", fmt.Errorf("github: create commit: status %d: %s",
 			resp.StatusCode, truncateForError(resp.Body))
@@ -380,6 +382,9 @@ func createCommit(token, owner, repo, message, treeSHA string, parents []string,
 // falls back to POST (branch does not exist). Returns an error only
 // if both fail with a non-422/404 status.
 func upsertBranchRef(token, owner, repo, branch, commitSHA string, c Doer) error {
+	if err := validateBranch(branch); err != nil {
+		return err
+	}
 	patchBody, _ := json.Marshal(struct {
 		SHA string `json:"sha"`
 	}{SHA: commitSHA})
@@ -398,7 +403,7 @@ func upsertBranchRef(token, owner, repo, branch, commitSHA string, c Doer) error
 	if err != nil {
 		return fmt.Errorf("github: upsert branch ref (PATCH): HTTP request failed: %w", err)
 	}
-	defer patchResp.Body.Close()
+	defer func() { _ = patchResp.Body.Close() }()
 	if patchResp.StatusCode >= 200 && patchResp.StatusCode < 300 {
 		return nil
 	}
@@ -424,7 +429,7 @@ func upsertBranchRef(token, owner, repo, branch, commitSHA string, c Doer) error
 	if err != nil {
 		return fmt.Errorf("github: upsert branch ref (POST): HTTP request failed: %w", err)
 	}
-	defer postResp.Body.Close()
+	defer func() { _ = postResp.Body.Close() }()
 	if postResp.StatusCode < 200 || postResp.StatusCode >= 300 {
 		return fmt.Errorf("github: upsert branch ref (POST): status %d: %s",
 			postResp.StatusCode, truncateForError(postResp.Body))
@@ -437,6 +442,12 @@ func upsertBranchRef(token, owner, repo, branch, commitSHA string, c Doer) error
 // is already open, GitHub returns 422; we surface a clear error
 // pointing the user to the existing PR.
 func createPullRequest(token, owner, repo, branch, baseBranch string, c Doer) (string, error) {
+	if err := validateBranch(branch); err != nil {
+		return "", err
+	}
+	if err := validateBranch(baseBranch); err != nil {
+		return "", err
+	}
 	body, err := json.Marshal(struct {
 		Title string `json:"title"`
 		Head  string `json:"head"`
@@ -458,7 +469,7 @@ func createPullRequest(token, owner, repo, branch, baseBranch string, c Doer) (s
 	if err != nil {
 		return "", fmt.Errorf("github: create PR: HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		var out struct {
 			HTMLURL string `json:"html_url"`
@@ -478,11 +489,4 @@ func createPullRequest(token, owner, repo, branch, baseBranch string, c Doer) (s
 	}
 	return "", fmt.Errorf("github: create PR: status %d: %s",
 		resp.StatusCode, truncateForError(resp.Body))
-}
-
-// readerForString returns an io.Reader for the given string. Kept as
-// a helper so the package does not need to import strings.NewReader
-// at multiple call sites.
-func readerForString(s string) io.Reader {
-	return bytes.NewReader([]byte(s))
 }

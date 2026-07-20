@@ -21,15 +21,16 @@ func TestLoadStateNoFile(t *testing.T) {
 	}
 	if state == nil {
 		t.Fatal("LoadState returned nil state for missing file")
-	}
-	if state.StatePath != path {
-		t.Errorf("StatePath = %q, want %q", state.StatePath, path)
-	}
-	if state.Step != "" || state.KeyID != "" || state.Email != "" {
-		t.Errorf("state is not empty: %+v", state)
-	}
-	if len(state.CompletedSteps) != 0 {
-		t.Errorf("CompletedSteps not empty: %v", state.CompletedSteps)
+	} else {
+		if state.StatePath != path {
+			t.Errorf("StatePath = %q, want %q", state.StatePath, path)
+		}
+		if state.Step != "" || state.KeyID != "" || state.Email != "" {
+			t.Errorf("state is not empty: %+v", state)
+		}
+		if len(state.CompletedSteps) != 0 {
+			t.Errorf("CompletedSteps not empty: %v", state.CompletedSteps)
+		}
 	}
 }
 

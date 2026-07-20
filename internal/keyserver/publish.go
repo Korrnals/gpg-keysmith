@@ -247,7 +247,7 @@ func publishToOpenPGP(armoredPubKey, fingerprint string, doer httpDoer) PublishR
 			Err:       fmt.Errorf("keyserver: publish to %s: HTTP request failed: %w", KeyserverOpenPGP, err),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return PublishResult{
@@ -306,7 +306,7 @@ func publishToUbuntu(armoredPubKey, fingerprint string, doer httpDoer) PublishRe
 			Err:       fmt.Errorf("keyserver: publish to %s: HTTP request failed: %w", KeyserverUbuntu, err),
 		}
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return PublishResult{
