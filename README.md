@@ -3,7 +3,7 @@
 </p>
 
 [![English](https://img.shields.io/badge/lang-English-blue.svg)](./docs/en/README.md) [![Русский](https://img.shields.io/badge/lang-Русский-red.svg)](./docs/ru/README.md)
-[![Version](https://img.shields.io/badge/version-0.7.0-0f766e.svg)](./VERSION) [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](./LICENSE) [![Go](https://img.shields.io/badge/Go-1.22%2B-00add8.svg)](https://go.dev) [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](./docs/en/installation.md)
+[![Version](https://img.shields.io/badge/version-1.0.0-0f766e.svg)](./VERSION) [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](./LICENSE) [![Go](https://img.shields.io/badge/Go-1.22%2B-00add8.svg)](https://go.dev) [![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows-lightgrey.svg)](./docs/en/installation.md)
 
 `gpg-keysmith` walks a developer from "no GPG key" to "signed commits on GitHub" in a single guided flow: generate a key, export it, publish the public key to GitHub and a keyserver, configure `git config user.signingkey`, and upload the private key as a repository secret for CI signing.
 
