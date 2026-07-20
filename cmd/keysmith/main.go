@@ -530,6 +530,53 @@ var detectExistingKeysFn = gpg.DetectExistingKeys
 // code calls the real gpg.GenerateKey through this indirection.
 var generateKeyFn = gpg.GenerateKey
 
+// The seams below are the same pattern as detectExistingKeysFn /
+// generateKeyFn: package-level vars pointing at the real internal/*
+// functions, replaced by tests to avoid shelling out to gpg / git /
+// gh / keyservers. They keep runExport / runGitConfig / runGithub /
+// runPublish / runWizard / runStatus testable end-to-end (flag
+// parsing → external call) without a real TTY or real subprocess.
+var (
+	// gpg seams.
+	exportPublicKeyFn             = gpg.ExportPublicKey
+	exportPrivateKeyFn            = gpg.ExportPrivateKey
+	extractFingerprintFromArmorFn = gpg.ExtractFingerprintFromArmorFile
+	detectKeyForEmailFn           = gpg.DetectKeyForEmail
+
+	// git seams.
+	applyGitConfigFn   = git.ApplyGitConfig
+	detectSigningKeyFn = git.DetectSigningKey
+
+	// github seams.
+	uploadPublicKeyWithFingerprintFn = github.UploadPublicKeyWithFingerprint
+	setGPGSecretsFn                  = github.SetGPGSecrets
+	commitPublicKeyFileFn            = github.CommitPublicKeyFile
+
+	// keyserver seam.
+	publishPubKeyFn = keyserver.PublishPubKey
+
+	// wizard seam. RunWizard orchestrates the six steps with resume
+	// support; tests replace it to assert the 'wizard' command wires
+	// flags into WizardOptions without running real gpg/git/gh.
+	runWizardFn = wizard.RunWizard
+
+	// status seam. CollectStatus lives in internal/status and has its
+	// own internal seams (detectKeysFn etc.) that are package-private
+	// and thus unreachable from cmd/keysmith tests. Hoisting the
+	// top-level call lets runStatus be exercised without a real
+	// keyring/git/gh/keyserver.
+	collectStatusFn = status.CollectStatus
+
+	// surveyAskOneFn is the seam for survey.AskOne. The run* commands
+	// prompt interactively for missing flags (name, email, key
+	// selection, passphrase). In a non-TTY test harness survey reads
+	// EOF from os.Stdin and returns an error, which would abort the
+	// command before the hoisted external-call seams run. Tests that
+	// exercise the interactive paths replace this with a stub that
+	// sets the response and returns nil.
+	surveyAskOneFn = survey.AskOne
+)
+
 func runDetect(cmd *cobra.Command, args []string) error {
 	out := cmd.OutOrStdout()
 	keys, err := detectExistingKeysFn()
@@ -604,13 +651,13 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	// interactive mode). Comment is optional — prompt only if empty.
 	if opts.Name == "" {
 		prompt := &survey.Input{Message: "Real name for the key:"}
-		if err := survey.AskOne(prompt, &opts.Name); err != nil {
+		if err := surveyAskOneFn(prompt, &opts.Name); err != nil {
 			return fmt.Errorf("generate: name prompt: %w", err)
 		}
 	}
 	if opts.Email == "" {
 		prompt := &survey.Input{Message: "Email for the key:"}
-		if err := survey.AskOne(prompt, &opts.Email); err != nil {
+		if err := surveyAskOneFn(prompt, &opts.Email); err != nil {
 			return fmt.Errorf("generate: email prompt: %w", err)
 		}
 	}
@@ -621,7 +668,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 	// user can add a comment or press Enter to skip.
 	if opts.Comment == "" && genPassphraseFile == "" {
 		prompt := &survey.Input{Message: "Comment (optional, press Enter to skip):"}
-		if err := survey.AskOne(prompt, &opts.Comment); err != nil {
+		if err := surveyAskOneFn(prompt, &opts.Comment); err != nil {
 			return fmt.Errorf("generate: comment prompt: %w", err)
 		}
 	}
@@ -647,7 +694,7 @@ func runGenerate(cmd *cobra.Command, args []string) error {
 		// Interactive: masked survey.Password field — never a flag
 		// (would leak via shell history / ps).
 		passphrasePrompt := &survey.Password{Message: "Passphrase for the new key:"}
-		if err := survey.AskOne(passphrasePrompt, &opts.Passphrase); err != nil {
+		if err := surveyAskOneFn(passphrasePrompt, &opts.Passphrase); err != nil {
 			return fmt.Errorf("generate: passphrase prompt: %w", err)
 		}
 		if opts.Passphrase == "" {
@@ -682,7 +729,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	keyID := expKeyID
 	if keyID == "" {
 		if expEmail != "" {
-			key, err := gpg.DetectKeyForEmail(expEmail)
+			key, err := detectKeyForEmailFn(expEmail)
 			if err != nil {
 				return fmt.Errorf("export: detect key for email: %w", err)
 			}
@@ -695,7 +742,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	}
 	if keyID == "" {
 		// Interactive: list keys and let the user pick.
-		keys, err := gpg.DetectExistingKeys()
+		keys, err := detectExistingKeysFn()
 		if err != nil {
 			return fmt.Errorf("export: detect existing keys: %w", err)
 		}
@@ -711,7 +758,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 			Message: "Select a key to export:",
 			Options: options,
 		}
-		if err := survey.AskOne(prompt, &choice); err != nil {
+		if err := surveyAskOneFn(prompt, &choice); err != nil {
 			return fmt.Errorf("export: key selection: %w", err)
 		}
 		// choice is "<keyid>  <userid>" — take the first field.
@@ -740,7 +787,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 		passphrase = p
 	} else {
 		prompt := &survey.Password{Message: "Passphrase for the key:"}
-		if err := survey.AskOne(prompt, &passphrase); err != nil {
+		if err := surveyAskOneFn(prompt, &passphrase); err != nil {
 			return fmt.Errorf("export: passphrase prompt: %w", err)
 		}
 		if passphrase == "" {
@@ -749,7 +796,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	}
 
 	// Export the public key to disk (0644 — it's public, not secret).
-	pubArmor, err := gpg.ExportPublicKey(keyID)
+	pubArmor, err := exportPublicKeyFn(keyID)
 	if err != nil {
 		return fmt.Errorf("export: %w", err)
 	}
@@ -763,7 +810,7 @@ func runExport(cmd *cobra.Command, args []string) error {
 	// (github secrets) will consume it. We assert non-empty so a
 	// silently-empty export is caught here rather than failing later
 	// in M6; the content itself is never inspected or echoed.
-	privArmor, err := gpg.ExportPrivateKey(keyID, passphrase)
+	privArmor, err := exportPrivateKeyFn(keyID, passphrase)
 	if err != nil {
 		return fmt.Errorf("export: %w", err)
 	}
@@ -779,13 +826,13 @@ func runExport(cmd *cobra.Command, args []string) error {
 
 	// Look up the fingerprint for the confirmation message.
 	fingerprint := ""
-	if key, err := gpg.DetectKeyForEmail(expEmail); err == nil && key != nil && key.Fingerprint != "" {
+	if key, err := detectKeyForEmailFn(expEmail); err == nil && key != nil && key.Fingerprint != "" {
 		fingerprint = key.Fingerprint
 	}
 	// If --email wasn't given, try to find the fingerprint by scanning
 	// the keyring for the keyid.
 	if fingerprint == "" {
-		if keys, err := gpg.DetectExistingKeys(); err == nil {
+		if keys, err := detectExistingKeysFn(); err == nil {
 			for _, k := range keys {
 				if k.KeyID == keyID {
 					fingerprint = k.Fingerprint
@@ -830,7 +877,7 @@ func runGitConfig(cmd *cobra.Command, args []string) error {
 	// config (same scope as --global). If that is also empty, scan the
 	// GPG keyring and prompt the user to pick a key.
 	if keyID == "" {
-		existing, err := git.DetectSigningKey(gcGlobal)
+		existing, err := detectSigningKeyFn(gcGlobal)
 		if err != nil {
 			return fmt.Errorf("git-config: read existing user.signingkey: %w", err)
 		}
@@ -842,7 +889,7 @@ func runGitConfig(cmd *cobra.Command, args []string) error {
 
 	if keyID == "" {
 		// Interactive: list GPG keys and let the user pick one.
-		keys, err := gpg.DetectExistingKeys()
+		keys, err := detectExistingKeysFn()
 		if err != nil {
 			return fmt.Errorf("git-config: detect existing GPG keys: %w", err)
 		}
@@ -858,7 +905,7 @@ func runGitConfig(cmd *cobra.Command, args []string) error {
 			Message: "Select a GPG key to use for signing:",
 			Options: options,
 		}
-		if err := survey.AskOne(prompt, &choice); err != nil {
+		if err := surveyAskOneFn(prompt, &choice); err != nil {
 			return fmt.Errorf("git-config: key selection: %w", err)
 		}
 		// choice is "<keyid>  <userid>" — take the first field.
@@ -875,7 +922,7 @@ func runGitConfig(cmd *cobra.Command, args []string) error {
 		Email:  gcEmail,
 		Global: gcGlobal,
 	}
-	if err := git.ApplyGitConfig(opts); err != nil {
+	if err := applyGitConfigFn(opts); err != nil {
 		return fmt.Errorf("git-config: %w", err)
 	}
 
@@ -968,7 +1015,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 	// 3. Resolve key id. --keyid > interactive pick from detect.
 	keyID := ghKeyID
 	if keyID == "" {
-		keys, err := gpg.DetectExistingKeys()
+		keys, err := detectExistingKeysFn()
 		if err != nil {
 			return fmt.Errorf("github: detect existing GPG keys: %w", err)
 		}
@@ -984,7 +1031,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 			Message: "Select a GPG key to use:",
 			Options: options,
 		}
-		if err := survey.AskOne(prompt, &choice); err != nil {
+		if err := surveyAskOneFn(prompt, &choice); err != nil {
 			return fmt.Errorf("github: key selection: %w", err)
 		}
 		if i := strings.IndexByte(choice, ' '); i > 0 {
@@ -1003,7 +1050,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 		}
 		pubArmor = string(b)
 	} else {
-		a, err := gpg.ExportPublicKey(keyID)
+		a, err := exportPublicKeyFn(keyID)
 		if err != nil {
 			return fmt.Errorf("github: export public key: %w", err)
 		}
@@ -1012,7 +1059,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 
 	// 5. Look up the fingerprint from detect (for dedup).
 	fingerprint := ""
-	if keys, err := gpg.DetectExistingKeys(); err == nil {
+	if keys, err := detectExistingKeysFn(); err == nil {
 		for _, k := range keys {
 			if k.KeyID == keyID {
 				fingerprint = k.Fingerprint
@@ -1025,7 +1072,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 	// private key for the repo secrets step.
 	var passphrase string
 	passPrompt := &survey.Password{Message: "Passphrase for the GPG key:"}
-	if err := survey.AskOne(passPrompt, &passphrase); err != nil {
+	if err := surveyAskOneFn(passPrompt, &passphrase); err != nil {
 		return fmt.Errorf("github: passphrase prompt: %w", err)
 	}
 	if passphrase == "" {
@@ -1033,7 +1080,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 	}
 
 	// 7. Export the private key (in-memory only, never on disk).
-	privArmor, err := gpg.ExportPrivateKey(keyID, passphrase)
+	privArmor, err := exportPrivateKeyFn(keyID, passphrase)
 	if err != nil {
 		return fmt.Errorf("github: export private key: %w", err)
 	}
@@ -1053,7 +1100,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 	// existing fingerprint is returned.
 	_, _ = fmt.Fprintln(out)
 	_, _ = fmt.Fprintln(out, "==> Uploading public key to GitHub...")
-	uploadedFP, err = github.UploadPublicKeyWithFingerprint(token, pubArmor, fingerprint)
+	uploadedFP, err = uploadPublicKeyWithFingerprintFn(token, pubArmor, fingerprint)
 	if err != nil {
 		// Report what we have so far and stop — the user needs to
 		// fix the upload before secrets/PR can proceed (the PR
@@ -1069,7 +1116,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 
 	// 9. Set GPG_PRIVATE_KEY and GPG_PASSPHRASE repo secrets via gh CLI.
 	_, _ = fmt.Fprintln(out, "==> Setting repo secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE...")
-	if err := github.SetGPGSecrets(token, owner, repo, privArmor, passphrase); err != nil {
+	if err := setGPGSecretsFn(token, owner, repo, privArmor, passphrase); err != nil {
 		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
 			didSetSecrets, didOpenPR, prURL)
 		return fmt.Errorf("github: set repo secrets: %w", err)
@@ -1079,7 +1126,7 @@ func runGithub(cmd *cobra.Command, args []string) error {
 
 	// 10. Commit gpg-public-key.asc and open a PR.
 	_, _ = fmt.Fprintln(out, "==> Committing gpg-public-key.asc and opening PR...")
-	prURL, err = github.CommitPublicKeyFile(token, owner, repo, pubArmor)
+	prURL, err = commitPublicKeyFileFn(token, owner, repo, pubArmor)
 	if err != nil {
 		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
 			didSetSecrets, didOpenPR, prURL)
@@ -1141,7 +1188,7 @@ func runPublish(cmd *cobra.Command, args []string) error {
 	// 1. Resolve the key id. --keyid > interactive pick from detect.
 	keyID := pubKeyID
 	if keyID == "" {
-		keys, err := gpg.DetectExistingKeys()
+		keys, err := detectExistingKeysFn()
 		if err != nil {
 			return fmt.Errorf("publish: detect existing GPG keys: %w", err)
 		}
@@ -1157,7 +1204,7 @@ func runPublish(cmd *cobra.Command, args []string) error {
 			Message: "Select a GPG key to publish:",
 			Options: options,
 		}
-		if err := survey.AskOne(prompt, &choice); err != nil {
+		if err := surveyAskOneFn(prompt, &choice); err != nil {
 			return fmt.Errorf("publish: key selection: %w", err)
 		}
 		if i := strings.IndexByte(choice, ' '); i > 0 {
@@ -1181,11 +1228,11 @@ func runPublish(cmd *cobra.Command, args []string) error {
 		// silently publish the wrong key under a misleading keyid
 		// label and report success (e2e bug B1).
 		if keyID != "" {
-			fileFp, err := gpg.ExtractFingerprintFromArmorFile(pubPubkeyFile)
+			fileFp, err := extractFingerprintFromArmorFn(pubPubkeyFile)
 			if err != nil {
 				return fmt.Errorf("publish: validate pubkey file: %w", err)
 			}
-			if keys, derr := gpg.DetectExistingKeys(); derr == nil {
+			if keys, derr := detectExistingKeysFn(); derr == nil {
 				for _, k := range keys {
 					if k.KeyID == keyID {
 						if k.Fingerprint != "" && !strings.EqualFold(k.Fingerprint, fileFp) {
@@ -1197,7 +1244,7 @@ func runPublish(cmd *cobra.Command, args []string) error {
 			}
 		}
 	} else {
-		a, err := gpg.ExportPublicKey(keyID)
+		a, err := exportPublicKeyFn(keyID)
 		if err != nil {
 			return fmt.Errorf("publish: export public key: %w", err)
 		}
@@ -1206,7 +1253,7 @@ func runPublish(cmd *cobra.Command, args []string) error {
 
 	// 3. Look up the fingerprint from detect (used to build the URL).
 	fingerprint := ""
-	if keys, err := gpg.DetectExistingKeys(); err == nil {
+	if keys, err := detectExistingKeysFn(); err == nil {
 		for _, k := range keys {
 			if k.KeyID == keyID {
 				fingerprint = k.Fingerprint
@@ -1237,7 +1284,7 @@ func runPublish(cmd *cobra.Command, args []string) error {
 
 	// 5. Publish.
 	_, _ = fmt.Fprintf(out, "Publishing public key %s to %s...\n", keyID, ks)
-	results, err := keyserver.PublishPubKey(keyserver.PublishOptions{
+	results, err := publishPubKeyFn(keyserver.PublishOptions{
 		ArmoredPubKey: pubArmor,
 		Keyserver:     ks,
 		Fingerprint:   fingerprint,
@@ -1399,7 +1446,7 @@ func runWizard(cmd *cobra.Command, args []string) error {
 	_, _ = fmt.Fprintln(out, "Starting gpg-keysmith wizard...")
 	_, _ = fmt.Fprintln(out, "State file:", statePath)
 	_, _ = fmt.Fprintln(out)
-	if err := wizard.RunWizard(opts); err != nil {
+	if err := runWizardFn(opts); err != nil {
 		return fmt.Errorf("wizard: %w", err)
 	}
 	return nil
@@ -1445,7 +1492,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		keyserverVal = cfg.Keyserver.Preferred
 	}
 
-	report := status.CollectStatus(status.StatusOptions{
+	report := collectStatusFn(status.StatusOptions{
 		GitHubToken: token,
 		Repo:        repo,
 		Keyserver:   keyserverVal,

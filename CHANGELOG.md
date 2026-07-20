@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- M14: coverage — `cmd/keysmith` run* happy-path tests via exec mocking (QA1), internal `wizard` (QA3) and `git` coverage backfills
+
 ## [1.1.0] — 2026-07-21
 
 ### Added

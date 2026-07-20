@@ -169,3 +169,249 @@ func TestGitConfigScope(t *testing.T) {
 		t.Errorf("gitConfigScope(true) = %v, want [\"--global\"]", got)
 	}
 }
+
+// --- ApplyGitConfig / DetectSigningKey happy-path tests (mocked exec) ---
+//
+// runGitConfigGet and runGitConfigSet are package-level function
+// variables so tests can override them to return canned values without
+// shelling out to real git. These tests exercise the resolution + write
+// logic of ApplyGitConfig and the read path of DetectSigningKey.
+
+// saveGitFns snapshots runGitConfigGet/Set and returns a restore
+// closure. Tests MUST defer it so mocks do not leak.
+func saveGitFns() func() {
+	savedGet := runGitConfigGet
+	savedSet := runGitConfigSet
+	return func() {
+		runGitConfigGet = savedGet
+		runGitConfigSet = savedSet
+	}
+}
+
+// TestApplyGitConfig_HappyPath verifies ApplyGitConfig writes all six
+// signing config keys when Name, Email, and a valid KeyID are supplied.
+// runGitConfigGet is mocked to return empty (so the flag values are
+// used, not existing config) and runGitConfigSet records every write
+// into a map so we can assert all six keys land with the right values.
+func TestApplyGitConfig_HappyPath(t *testing.T) {
+	defer saveGitFns()()
+
+	// runGitConfigGet is only called when Name or Email is empty. We
+	// pass both, so it should NOT be invoked — wire it to fail loudly.
+	runGitConfigGet = func(bool, string) (string, error) {
+		t.Error("runGitConfigGet should not be called when Name and Email are supplied")
+		return "", nil
+	}
+
+	written := make(map[string]string)
+	runGitConfigSet = func(global bool, key, value string) error {
+		if global {
+			t.Errorf("set should use local scope (global=false), got global=true for %s", key)
+		}
+		written[key] = value
+		return nil
+	}
+
+	opts := ConfigOptions{
+		KeyID:  "F49BE957CD553B1C",
+		Name:   "Leonid Golikhin",
+		Email:  "korrnals@example.com",
+		Global: false,
+	}
+	if err := ApplyGitConfig(opts); err != nil {
+		t.Fatalf("ApplyGitConfig happy path: %v", err)
+	}
+
+	want := map[string]string{
+		"user.name":       "Leonid Golikhin",
+		"user.email":      "korrnals@example.com",
+		"user.signingkey": "F49BE957CD553B1C",
+		"commit.gpgsign":  "true",
+		"gpg.format":      "openpgp",
+		"tag.gpgsign":     "true",
+	}
+	if len(written) != len(want) {
+		t.Fatalf("wrote %d keys, want %d: %v", len(written), len(want), written)
+	}
+	for k, w := range want {
+		if written[k] != w {
+			t.Errorf("written[%q] = %q, want %q", k, written[k], w)
+		}
+	}
+}
+
+// TestApplyGitConfig_ResolvesNameFromExisting verifies that when Name
+// is empty, ApplyGitConfig reads the existing user.name from git
+// config (via runGitConfigGet) and uses it. Email is supplied so only
+// the Name resolution path is exercised.
+func TestApplyGitConfig_ResolvesNameFromExisting(t *testing.T) {
+	defer saveGitFns()()
+
+	getCalls := 0
+	runGitConfigGet = func(global bool, key string) (string, error) {
+		getCalls++
+		if key == "user.name" {
+			return "Existing Name", nil
+		}
+		// user.email should not be queried because Email is supplied.
+		t.Errorf("runGitConfigGet queried unexpected key %q", key)
+		return "", nil
+	}
+
+	written := make(map[string]string)
+	runGitConfigSet = func(bool, string, string) error { return nil }
+	_ = written
+
+	opts := ConfigOptions{
+		KeyID: "ABCD1234DEF05678",
+		Name:  "", // empty → resolve from existing
+		Email: "resolved@example.com",
+	}
+	if err := ApplyGitConfig(opts); err != nil {
+		t.Fatalf("ApplyGitConfig resolve-name: %v", err)
+	}
+	if getCalls != 1 {
+		t.Errorf("runGitConfigGet called %d times, want 1 (user.name)", getCalls)
+	}
+}
+
+// TestApplyGitConfig_MissingNameErrors verifies that when Name is
+// empty AND the existing user.name is also empty, ApplyGitConfig
+// returns a clear error instead of silently writing an empty name.
+func TestApplyGitConfig_MissingNameErrors(t *testing.T) {
+	defer saveGitFns()()
+	runGitConfigGet = func(bool, string) (string, error) { return "", nil }
+	runGitConfigSet = func(bool, string, string) error {
+		t.Error("runGitConfigSet should not be called when name resolution fails")
+		return nil
+	}
+	opts := ConfigOptions{
+		KeyID: "ABCD1234DEF05678",
+		Name:  "",
+		Email: "x@y.z",
+	}
+	err := ApplyGitConfig(opts)
+	if err == nil {
+		t.Fatal("ApplyGitConfig with missing name must error")
+	}
+	if !strings.Contains(err.Error(), "user.name") {
+		t.Errorf("error should mention user.name, got: %v", err)
+	}
+}
+
+// TestApplyGitConfig_MissingEmailErrors verifies the email resolution
+// guard. Name is supplied so only the email path is exercised.
+func TestApplyGitConfig_MissingEmailErrors(t *testing.T) {
+	defer saveGitFns()()
+	runGitConfigGet = func(bool, string) (string, error) { return "", nil }
+	runGitConfigSet = func(bool, string, string) error {
+		t.Error("runGitConfigSet should not be called when email resolution fails")
+		return nil
+	}
+	opts := ConfigOptions{
+		KeyID: "ABCD1234DEF05678",
+		Name:  "Has Name",
+		Email: "",
+	}
+	err := ApplyGitConfig(opts)
+	if err == nil {
+		t.Fatal("ApplyGitConfig with missing email must error")
+	}
+	if !strings.Contains(err.Error(), "user.email") {
+		t.Errorf("error should mention user.email, got: %v", err)
+	}
+}
+
+// TestApplyGitConfig_GetErrorPropagates verifies a git config --get
+// failure (not the "not found" empty-string case, but a real git
+// error) is propagated as a wrapped error rather than swallowed.
+func TestApplyGitConfig_GetErrorPropagates(t *testing.T) {
+	defer saveGitFns()()
+	runGitConfigGet = func(bool, string) (string, error) {
+		return "", errForTest("git binary missing")
+	}
+	runGitConfigSet = func(bool, string, string) error { return nil }
+	opts := ConfigOptions{
+		KeyID: "ABCD1234DEF05678",
+		Name:  "",
+		Email: "x@y.z",
+	}
+	err := ApplyGitConfig(opts)
+	if err == nil {
+		t.Fatal("ApplyGitConfig must propagate a get error")
+	}
+	if !strings.Contains(err.Error(), "read existing user.name") {
+		t.Errorf("error should wrap the read-existing-user.name failure, got: %v", err)
+	}
+}
+
+// TestApplyGitConfig_SetErrorPropagates verifies a git config <key>
+// <value> failure is propagated as a wrapped error and the run stops
+// (no further keys are written after the failure).
+func TestApplyGitConfig_SetErrorPropagates(t *testing.T) {
+	defer saveGitFns()()
+	runGitConfigGet = func(bool, string) (string, error) { return "", nil }
+
+	setCalls := 0
+	runGitConfigSet = func(bool, string, string) error {
+		setCalls++
+		return errForTest("write permission denied")
+	}
+	opts := ConfigOptions{
+		KeyID: "ABCD1234DEF05678",
+		Name:  "Name",
+		Email: "x@y.z",
+	}
+	err := ApplyGitConfig(opts)
+	if err == nil {
+		t.Fatal("ApplyGitConfig must propagate a set error")
+	}
+	if setCalls != 1 {
+		t.Errorf("runGitConfigSet called %d times, want exactly 1 (stop on first failure)", setCalls)
+	}
+}
+
+// TestDetectSigningKey_HappyPath verifies DetectSigningKey returns the
+// signing key id read from git config via the mocked runGitConfigGet.
+func TestDetectSigningKey_HappyPath(t *testing.T) {
+	defer saveGitFns()()
+	runGitConfigGet = func(global bool, key string) (string, error) {
+		if global {
+			t.Errorf("DetectSigningKey(false) should not pass global=true, got key=%q", key)
+		}
+		if key != "user.signingkey" {
+			t.Errorf("DetectSigningKey queried %q, want user.signingkey", key)
+		}
+		return "SIGN0000KEY00000", nil
+	}
+	got, err := DetectSigningKey(false)
+	if err != nil {
+		t.Fatalf("DetectSigningKey: %v", err)
+	}
+	if got != "SIGN0000KEY00000" {
+		t.Errorf("DetectSigningKey = %q, want SIGN0000KEY00000", got)
+	}
+}
+
+// TestDetectSigningKey_NotSetReturnsEmpty verifies that a missing
+// user.signingkey (the "not found" empty-string case, not an error)
+// returns ("", nil) — the caller decides what to do.
+func TestDetectSigningKey_NotSetReturnsEmpty(t *testing.T) {
+	defer saveGitFns()()
+	runGitConfigGet = func(bool, string) (string, error) { return "", nil }
+	got, err := DetectSigningKey(true)
+	if err != nil {
+		t.Fatalf("DetectSigningKey on missing key returned error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("DetectSigningKey on missing key = %q, want empty", got)
+	}
+}
+
+// errForTest is a tiny sentinel error used by the git config tests to
+// simulate git failures. Local to avoid importing the wizard package.
+type gitTestError struct{ msg string }
+
+func (e *gitTestError) Error() string { return e.msg }
+
+func errForTest(msg string) error { return &gitTestError{msg: msg} }

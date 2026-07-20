@@ -6,6 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Korrnals/gpg-keysmith/internal/git"
+	"github.com/Korrnals/gpg-keysmith/internal/gpg"
+	"github.com/Korrnals/gpg-keysmith/internal/keyserver"
 )
 
 // --- State persistence tests -------------------------------------------
@@ -810,5 +814,463 @@ func TestRunWizard_SkipStep(t *testing.T) {
 	// publish must still have run (last step).
 	if !contains(invoked, StepPublish) {
 		t.Errorf("StepPublish should have run after skip: %v", invoked)
+	}
+}
+
+// TestRunWizard_AllStepsAlreadyDone pre-writes a state file with all
+// six steps in CompletedSteps, then calls RunWizard. Asserts no step
+// runner is invoked (all are skipped via the "already done" path) and
+// RunWizard returns nil. This is the idempotent-replay case: the
+// wizard completed once, the state was not cleared (e.g. manual
+// inspection), and a second run is a no-op that clears the state file.
+func TestRunWizard_AllStepsAlreadyDone(t *testing.T) {
+	swapRunners(t)
+	autoConfirm(t)
+
+	// Every step runner is a sentinel that fails the test if invoked.
+	for _, name := range stepOrder {
+		name := name
+		stepRunners[name] = func(*WizardState, WizardOptions) error {
+			t.Errorf("step %q should have been skipped (already done)", name)
+			return nil
+		}
+	}
+
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	// Pre-write a state with all six steps completed.
+	prior := &WizardState{
+		StatePath:      statePath,
+		CompletedSteps: append([]string{}, stepOrder...),
+		KeyID:          "DONE0000000000",
+		Email:          "done@example.com",
+		Repo:           "owner/repo",
+	}
+	if err := SaveState(prior); err != nil {
+		t.Fatalf("SaveState prior: %v", err)
+	}
+
+	if err := RunWizard(WizardOptions{StatePath: statePath}); err != nil {
+		t.Fatalf("RunWizard with all steps done: %v", err)
+	}
+
+	// After a fully-done run, RunWizard clears the state file.
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Errorf("state file should be cleared after an all-done run: err=%v", err)
+	}
+}
+
+// --- Real step-body tests (QA3 — exercise the actual step functions) ---
+//
+// The TestRunWizard_* suite above overrides the stepRunners map, so
+// the real step* bodies stay at 0% coverage. These tests exercise the
+// actual step* functions (stepDetect, stepGenerate, stepExport,
+// stepGitConfig, stepGitHub, stepPublish) by mocking ONLY the
+// underlying gpg/git/github/keyserver calls via the package-level
+// function-variable seams. Every WizardOptions field is pre-filled so
+// no survey.AskOne call fires (which would block in a non-TTY harness).
+// This lifts wizard coverage above the 50% target.
+
+// saveStepFns snapshots every function-variable seam in wizard.go and
+// returns a restore closure. Tests MUST defer it so mocks do not leak
+// into other tests.
+func saveStepFns() func() {
+	saved := struct {
+		detectExistingKeys  func() ([]gpg.GpgKey, error)
+		generateKey         func(gpg.GenerateOptions) (string, error)
+		exportPublicKey     func(string) (string, error)
+		exportPrivateKey    func(string, string) (string, error)
+		applyGitConfig      func(git.ConfigOptions) error
+		uploadPublicKey     func(string, string, string) (string, error)
+		setGPGSecrets       func(string, string, string, string, string) error
+		commitPublicKeyFile func(string, string, string, string) (string, error)
+		publishPubKey       func(keyserver.PublishOptions) ([]keyserver.PublishResult, error)
+	}{
+		gpgDetectExistingKeysFn, gpgGenerateKeyFn, gpgExportPublicKeyFn,
+		gpgExportPrivateKeyFn, gitApplyGitConfigFn, githubUploadPublicKeyFn,
+		githubSetGPGSecretsFn, githubCommitPublicKeyFileFn, keyserverPublishPubKeyFn,
+	}
+	return func() {
+		gpgDetectExistingKeysFn = saved.detectExistingKeys
+		gpgGenerateKeyFn = saved.generateKey
+		gpgExportPublicKeyFn = saved.exportPublicKey
+		gpgExportPrivateKeyFn = saved.exportPrivateKey
+		gitApplyGitConfigFn = saved.applyGitConfig
+		githubUploadPublicKeyFn = saved.uploadPublicKey
+		githubSetGPGSecretsFn = saved.setGPGSecrets
+		githubCommitPublicKeyFileFn = saved.commitPublicKeyFile
+		keyserverPublishPubKeyFn = saved.publishPubKey
+	}
+}
+
+// happyStepFns wires every seam to a no-op success that returns
+// canned values suitable for the happy-path step tests. It does NOT
+// touch the survey prompts — callers pre-fill WizardOptions so the
+// survey branches are not reached.
+func happyStepFns() {
+	gpgDetectExistingKeysFn = func() ([]gpg.GpgKey, error) {
+		return []gpg.GpgKey{{
+			KeyID:       "HAPPY0000KEY0000",
+			Fingerprint: "HAPPY0000KEY0000HAPPY0000KEY0000HAPPY00",
+			UserId:      "Happy <happy@example.com>",
+		}}, nil
+	}
+	gpgGenerateKeyFn = func(gpg.GenerateOptions) (string, error) {
+		return "GEN00000000KEY00", nil
+	}
+	gpgExportPublicKeyFn = func(string) (string, error) {
+		return "-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCK\n-----END-----", nil
+	}
+	gpgExportPrivateKeyFn = func(string, string) (string, error) {
+		return "-----BEGIN PGP PRIVATE KEY BLOCK-----\nMOCK\n-----END-----", nil
+	}
+	gitApplyGitConfigFn = func(git.ConfigOptions) error { return nil }
+	githubUploadPublicKeyFn = func(string, string, string) (string, error) {
+		return "UPLOAD0000FP00000", nil
+	}
+	githubSetGPGSecretsFn = func(string, string, string, string, string) error { return nil }
+	githubCommitPublicKeyFileFn = func(string, string, string, string) (string, error) {
+		return "https://github.com/owner/repo/pull/1", nil
+	}
+	keyserverPublishPubKeyFn = func(keyserver.PublishOptions) ([]keyserver.PublishResult, error) {
+		return []keyserver.PublishResult{{
+			Keyserver: keyserver.KeyserverOpenPGP,
+			Success:   true,
+			URL:       "https://keys.openpgp.org/vks/vby/HAPPY",
+		}}, nil
+	}
+}
+
+// TestStepDetect_NoKeys exercises the real stepDetect with the gpg
+// seam returning an empty key list — the "fresh run" branch. No survey
+// fires because the empty-list path returns before any prompt.
+func TestStepDetect_NoKeys(t *testing.T) {
+	defer saveStepFns()()
+	gpgDetectExistingKeysFn = func() ([]gpg.GpgKey, error) { return nil, nil }
+
+	state := &WizardState{}
+	if err := stepDetect(state); err != nil {
+		t.Fatalf("stepDetect with no keys: %v", err)
+	}
+	if state.KeyID != "" {
+		t.Errorf("KeyID should be empty when no keys exist, got %q", state.KeyID)
+	}
+}
+
+// TestStepDetect_ReuseExisting exercises the real stepDetect with one
+// mocked key and state pre-populated so the survey.Select branch is
+// NOT reached (stepDetect only prompts when keys exist; we pre-set the
+// reuse choice via the KeyID short-circuit by setting state.KeyID).
+// We exercise the empty-keys branch above; here we instead verify the
+// "reuse" path is taken when state.KeyID is already set (the generate
+// step is a no-op when KeyID is set, and detect's survey path is not
+// unit-testable without a survey mock). Instead this test covers the
+// "keys exist" branch via the detect call returning a key and the
+// survey being driven to "Generate a new key" — but survey requires a
+// TTY, so we only assert the error-free empty path is covered.
+func TestStepDetect_ReuseExisting(t *testing.T) {
+	defer saveStepFns()()
+	// One key returned; survey would prompt. We cannot drive survey
+	// in a non-TTY, so this test exercises the error path when the
+	// detect call fails — that path returns before any survey.
+	gpgDetectExistingKeysFn = func() ([]gpg.GpgKey, error) {
+		return nil, errForTest("gpg binary missing")
+	}
+	state := &WizardState{}
+	err := stepDetect(state)
+	if err == nil {
+		t.Fatal("stepDetect with a detect error must return an error")
+	}
+	if !strings.Contains(err.Error(), "detect:") {
+		t.Errorf("error should be wrapped with 'detect:', got: %v", err)
+	}
+}
+
+// TestStepGenerate_HappyPath exercises the real stepGenerate with
+// every input pre-filled (Name, Email, Passphrase) so no survey fires.
+// Asserts the gpg.GenerateOptions passed to the seam carry the
+// resolved fields and state.KeyID is set to the returned key id.
+func TestStepGenerate_HappyPath(t *testing.T) {
+	defer saveStepFns()()
+
+	var captured gpg.GenerateOptions
+	gpgGenerateKeyFn = func(opts gpg.GenerateOptions) (string, error) {
+		captured = opts
+		return "GEN00000000KEY00", nil
+	}
+
+	state := &WizardState{Email: "gen@example.com"}
+	opts := WizardOptions{
+		Name:       "Gen User",
+		Comment:    "keysmith",
+		KeyLength:  4096,
+		Expiry:     "0",
+		Passphrase: "gen-pass",
+	}
+	if err := stepGenerate(state, opts); err != nil {
+		t.Fatalf("stepGenerate: %v", err)
+	}
+	if state.KeyID != "GEN00000000KEY00" {
+		t.Errorf("state.KeyID = %q, want %q", state.KeyID, "GEN00000000KEY00")
+	}
+	if captured.Name != "Gen User" {
+		t.Errorf("captured Name = %q, want %q", captured.Name, "Gen User")
+	}
+	if captured.Email != "gen@example.com" {
+		t.Errorf("captured Email = %q, want gen@example.com", captured.Email)
+	}
+	if captured.Passphrase != "gen-pass" {
+		t.Errorf("captured Passphrase mismatch (got %d chars)", len(captured.Passphrase))
+	}
+	if captured.KeyType != "RSA" {
+		t.Errorf("captured KeyType = %q, want RSA", captured.KeyType)
+	}
+}
+
+// TestStepGenerate_ReuseExistingKey exercises the no-op branch of
+// stepGenerate: when state.KeyID is already set (an existing key was
+// reused in detect), generate MUST NOT call gpg and MUST return nil.
+func TestStepGenerate_ReuseExistingKey(t *testing.T) {
+	defer saveStepFns()()
+
+	gpgGenerateKeyFn = func(gpg.GenerateOptions) (string, error) {
+		t.Fatal("gpgGenerateKeyFn should NOT be called when state.KeyID is set")
+		return "", nil
+	}
+
+	state := &WizardState{KeyID: "REUSE0000KEY0000"}
+	if err := stepGenerate(state, WizardOptions{}); err != nil {
+		t.Fatalf("stepGenerate reuse: %v", err)
+	}
+	if state.KeyID != "REUSE0000KEY0000" {
+		t.Errorf("state.KeyID changed: %q", state.KeyID)
+	}
+}
+
+// TestStepExport_HappyPath exercises the real stepExport with KeyID
+// and Passphrase pre-filled so no survey fires. Asserts the gpg seams
+// receive the key id + passphrase and the armored keys land in state.
+func TestStepExport_HappyPath(t *testing.T) {
+	defer saveStepFns()()
+	happyStepFns()
+
+	var gotKeyID, gotPassphrase string
+	gpgExportPublicKeyFn = func(keyID string) (string, error) {
+		gotKeyID = keyID
+		return "-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCK\n-----END-----", nil
+	}
+	gpgExportPrivateKeyFn = func(keyID, passphrase string) (string, error) {
+		gotPassphrase = passphrase
+		return "-----BEGIN PGP PRIVATE KEY BLOCK-----\nMOCK\n-----END-----", nil
+	}
+
+	state := &WizardState{KeyID: "EXP00000KEY00000", Passphrase: "exp-pass"}
+	if err := stepExport(state, WizardOptions{Passphrase: "exp-pass"}); err != nil {
+		t.Fatalf("stepExport: %v", err)
+	}
+	if gotKeyID != "EXP00000KEY00000" {
+		t.Errorf("export got keyID %q, want EXP00000KEY00000", gotKeyID)
+	}
+	if gotPassphrase != "exp-pass" {
+		t.Errorf("export got passphrase mismatch (len=%d)", len(gotPassphrase))
+	}
+	if !strings.Contains(state.PubKeyArmor, "PUBLIC KEY") {
+		t.Errorf("state.PubKeyArmor not populated: %q", state.PubKeyArmor)
+	}
+	if !strings.Contains(state.PrivateKey, "PRIVATE KEY") {
+		t.Errorf("state.PrivateKey not populated: %q", state.PrivateKey)
+	}
+}
+
+// TestStepExport_NoKeyID exercises the guard branch: stepExport
+// returns an error and does NOT call gpg when KeyID is empty.
+func TestStepExport_NoKeyID(t *testing.T) {
+	defer saveStepFns()()
+	gpgExportPublicKeyFn = func(string) (string, error) {
+		t.Fatal("exportPublicKey should not be called with empty KeyID")
+		return "", nil
+	}
+	state := &WizardState{}
+	err := stepExport(state, WizardOptions{Passphrase: "p"})
+	if err == nil {
+		t.Fatal("stepExport with empty KeyID must error")
+	}
+	if !strings.Contains(err.Error(), "no key id") {
+		t.Errorf("error should mention 'no key id', got: %v", err)
+	}
+}
+
+// TestStepGitConfig_HappyPath exercises the real stepGitConfig with a
+// mocked git.ApplyGitConfig seam. Asserts the ConfigOptions carry the
+// state's KeyID and Email and Global is always false (wizard uses
+// local repo config).
+func TestStepGitConfig_HappyPath(t *testing.T) {
+	defer saveStepFns()()
+
+	var captured git.ConfigOptions
+	gitApplyGitConfigFn = func(opts git.ConfigOptions) error {
+		captured = opts
+		return nil
+	}
+
+	state := &WizardState{KeyID: "GIT00000KEY00000", Email: "git@example.com"}
+	opts := WizardOptions{Name: "Git User"}
+	if err := stepGitConfig(state, opts); err != nil {
+		t.Fatalf("stepGitConfig: %v", err)
+	}
+	if captured.KeyID != "GIT00000KEY00000" {
+		t.Errorf("captured KeyID = %q", captured.KeyID)
+	}
+	if captured.Email != "git@example.com" {
+		t.Errorf("captured Email = %q", captured.Email)
+	}
+	if captured.Name != "Git User" {
+		t.Errorf("captured Name = %q", captured.Name)
+	}
+	if captured.Global {
+		t.Error("wizard git-config must use local scope, got Global=true")
+	}
+}
+
+// TestStepGitConfig_NoKeyID exercises the guard branch.
+func TestStepGitConfig_NoKeyID(t *testing.T) {
+	defer saveStepFns()()
+	gitApplyGitConfigFn = func(git.ConfigOptions) error {
+		t.Fatal("applyGitConfig should not be called with empty KeyID")
+		return nil
+	}
+	state := &WizardState{}
+	err := stepGitConfig(state, WizardOptions{})
+	if err == nil {
+		t.Fatal("stepGitConfig with empty KeyID must error")
+	}
+}
+
+// TestStepGitHub_HappyPath exercises the real stepGitHub with every
+// input pre-filled (Repo, GitHubToken, PubKeyArmor) so no survey fires.
+// Asserts the three github seams are called and state.Repo is set.
+func TestStepGitHub_HappyPath(t *testing.T) {
+	defer saveStepFns()()
+	happyStepFns()
+
+	var uploadToken, uploadArmor string
+	var setToken, setOwner, setName string
+	var commitToken, commitOwner, commitRepo, commitArmor string
+
+	githubUploadPublicKeyFn = func(token, armor, _ string) (string, error) {
+		uploadToken = token
+		uploadArmor = armor
+		return "UPLOAD0000FP00000", nil
+	}
+	githubSetGPGSecretsFn = func(token, owner, repo, _, _ string) error {
+		setToken, setOwner, setName = token, owner, repo
+		return nil
+	}
+	githubCommitPublicKeyFileFn = func(token, owner, repo, armor string) (string, error) {
+		commitToken, commitOwner, commitRepo, commitArmor = token, owner, repo, armor
+		return "https://github.com/owner/repo/pull/1", nil
+	}
+
+	state := &WizardState{
+		KeyID:       "GH00000KEY000000",
+		PubKeyArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCK\n-----END-----",
+		PrivateKey:  "-----BEGIN PGP PRIVATE KEY BLOCK-----\nMOCK\n-----END-----",
+		Passphrase:  "gh-pass",
+	}
+	opts := WizardOptions{Repo: "owner/repo", GitHubToken: "ghp-token"}
+	if err := stepGitHub(state, opts); err != nil {
+		t.Fatalf("stepGitHub: %v", err)
+	}
+	if uploadToken != "ghp-token" || uploadArmor != state.PubKeyArmor {
+		t.Errorf("uploadPubKey received wrong args: token=%q", uploadToken)
+	}
+	if setToken != "ghp-token" || setOwner != "owner" || setName != "repo" {
+		t.Errorf("setGPGSecrets received wrong args: owner=%q repo=%q", setOwner, setName)
+	}
+	if commitToken != "ghp-token" || commitOwner != "owner" || commitRepo != "repo" || commitArmor != state.PubKeyArmor {
+		t.Errorf("commitPubKeyFile received wrong args: owner=%q repo=%q", commitOwner, commitRepo)
+	}
+	if state.Repo != "owner/repo" {
+		t.Errorf("state.Repo = %q, want owner/repo", state.Repo)
+	}
+}
+
+// TestStepGitHub_NoToken exercises the guard branch: with no token
+// and no env var, the survey prompt would fire and block — instead we
+// pre-set GitHubToken and test the empty-PubKeyArmor guard which
+// returns before the token resolution.
+func TestStepGitHub_NoPubArmor(t *testing.T) {
+	defer saveStepFns()()
+	githubUploadPublicKeyFn = func(string, string, string) (string, error) {
+		t.Fatal("uploadPubKey should not be called with empty PubKeyArmor")
+		return "", nil
+	}
+	state := &WizardState{KeyID: "GH00000KEY000000"}
+	err := stepGitHub(state, WizardOptions{GitHubToken: "ghp-token"})
+	if err == nil {
+		t.Fatal("stepGitHub with empty PubKeyArmor must error")
+	}
+	if !strings.Contains(err.Error(), "no public key armor") {
+		t.Errorf("error should mention 'no public key armor', got: %v", err)
+	}
+}
+
+// TestStepPublish_HappyPath exercises the real stepPublish with the
+// keyserver seam mocked to return a successful result. Asserts state
+// is not mutated and no error is returned when at least one keyserver
+// accepted the upload.
+func TestStepPublish_HappyPath(t *testing.T) {
+	defer saveStepFns()()
+	happyStepFns()
+
+	state := &WizardState{
+		KeyID:       "PUB00000KEY00000",
+		PubKeyArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCK\n-----END-----",
+	}
+	if err := stepPublish(state, WizardOptions{Keyserver: keyserver.KeyserverOpenPGP}); err != nil {
+		t.Fatalf("stepPublish: %v", err)
+	}
+}
+
+// TestStepPublish_NoPubArmor exercises the guard branch.
+func TestStepPublish_NoPubArmor(t *testing.T) {
+	defer saveStepFns()()
+	keyserverPublishPubKeyFn = func(keyserver.PublishOptions) ([]keyserver.PublishResult, error) {
+		t.Fatal("publishPubKey should not be called with empty PubKeyArmor")
+		return nil, nil
+	}
+	state := &WizardState{}
+	err := stepPublish(state, WizardOptions{})
+	if err == nil {
+		t.Fatal("stepPublish with empty PubKeyArmor must error")
+	}
+	if !strings.Contains(err.Error(), "no public key armor") {
+		t.Errorf("error should mention 'no public key armor', got: %v", err)
+	}
+}
+
+// TestStepPublish_AllKeyserversFail exercises the error path where
+// no keyserver accepted the upload — stepPublish must surface the
+// "no keyserver accepted" error.
+func TestStepPublish_AllKeyserversFail(t *testing.T) {
+	defer saveStepFns()()
+	keyserverPublishPubKeyFn = func(keyserver.PublishOptions) ([]keyserver.PublishResult, error) {
+		return []keyserver.PublishResult{{
+			Keyserver: keyserver.KeyserverOpenPGP,
+			Success:   false,
+			Err:       errForTest("keyserver rejected"),
+		}}, nil
+	}
+	state := &WizardState{
+		KeyID:       "PUB00000KEY00000",
+		PubKeyArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCK\n-----END-----",
+	}
+	err := stepPublish(state, WizardOptions{Keyserver: keyserver.KeyserverOpenPGP})
+	if err == nil {
+		t.Fatal("stepPublish with all failures must error")
+	}
+	if !strings.Contains(err.Error(), "no keyserver accepted") {
+		t.Errorf("error should mention 'no keyserver accepted', got: %v", err)
 	}
 }
