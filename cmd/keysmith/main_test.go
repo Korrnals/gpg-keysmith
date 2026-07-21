@@ -167,6 +167,25 @@ func TestRootNoSubcommand(t *testing.T) {
 	}
 }
 
+// TestVersionFlag verifies --version prints the version and exits 0.
+// The version var is "dev" in tests (no ldflags injection), so we
+// assert the output contains "keysmith" and the version marker. At
+// build time the Makefile injects "v$(cat VERSION)" (e.g. "v1.1.2")
+// via -ldflags "-X main.version=..."; in tests version is "dev".
+func TestVersionFlag(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+	out, _, err := runRoot(t, "--version")
+	if err != nil {
+		t.Fatalf("root --version returned error: %v", err)
+	}
+	if !strings.Contains(out, "keysmith") {
+		t.Errorf("version output missing 'keysmith':\n%s", out)
+	}
+	if !strings.Contains(out, version) {
+		t.Errorf("version output missing version %q:\n%s", version, out)
+	}
+}
+
 // TestCompletion verifies 'completion bash' outputs a non-empty bash
 // completion script.
 func TestCompletion(t *testing.T) {

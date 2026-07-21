@@ -28,6 +28,13 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// version is the keysmith build version. It is overridden at build time
+// via -ldflags "-X main.version=v$(cat VERSION)" (see the Makefile build
+// target). The default "dev" is used by `go run` and `go test` (no
+// ldflags injection). cobra's Version field auto-registers a --version / -v
+// flag that prints this value.
+var version = "dev"
+
 // configFile is the path to the gpg-keysmith config.yaml. Set by the
 // global --config flag. An empty value means "use the default path"
 // (~/.config/gpg-keysmith/config.yaml), resolved lazily so a missing
@@ -44,7 +51,18 @@ private key as a repository secret for CI signing.
 
 Run 'keysmith wizard' for the full interactive setup, or 'keysmith detect'
 to list existing GPG keys.`,
+	// Version is wired so cobra auto-adds a --version / -v flag that
+	// prints "keysmith <version>" and exits 0. The Makefile build target
+	// injects the real version via -ldflags "-X main.version=v$(cat VERSION)".
+	Version:      version,
 	SilenceUsage: true,
+}
+
+func init() {
+	// Custom version template: "keysmith <version>\n" (cleaner than
+	// cobra's default "keysmith version <version>\n"). Set in init() so
+	// it applies after cobra has resolved the Version field.
+	rootCmd.SetVersionTemplate("keysmith {{.Version}}\n")
 }
 
 // loadConfig loads the config from the --config path (or the default
