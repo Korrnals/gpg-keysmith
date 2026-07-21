@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] — 2026-07-21
+
 ### Added
 - make install: one-command install (build + deps check/auto-install + PATH setup), OS/shell auto-detection
 - M16: `--version` / `-v` flag on the root command (cobra `Version` field); prints `keysmith <version>` and exits 0 — fixes `make install` verification step which called `keysmith --version` on a binary with no such flag
