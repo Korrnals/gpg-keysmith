@@ -78,7 +78,7 @@ Pull requests welcome. Before submitting, run the local CI pipeline:
 make ci     # mod verify + fmt + vet + build + test — must be green
 ```
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. See [DEVELOPMENT.md](../../DEVELOPMENT.md) for the original 10-milestone roadmap.
+Follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full contributor guide; the original 10-milestone roadmap lives in [DEVELOPMENT.md](../../DEVELOPMENT.md).
 
 ## License
 

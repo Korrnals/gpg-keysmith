@@ -1,0 +1,234 @@
+.TH KEYSMITH 1 "2026-07-21" "gpg-keysmith 1.1.1" "gpg-keysmith Manual"
+.SH NAME
+keysmith \- automated GPG key generation and GitHub integration
+.SH SYNOPSIS
+.B keysmith
+.RI [ command ]
+.RI [ flags ]
+.SH DESCRIPTION
+.B keysmith
+is a Go CLI that automates the full path from \(lqno GPG key\(rq to \(lqsigned
+commits flowing on GitHub\(rq. It generates a new OpenPGP key, exports the
+public key, configures git to sign commits and tags, uploads the public key
+to your GitHub account, stores the private key and passphrase as repository
+Action secrets for CI signing, and publishes the public key to a public
+keyserver \(em all orchestrated by a single
+.B wizard
+command or available as individual subcommands.
+.PP
+The tool shells out to
+.BR gpg (1),
+.BR git (1),
+and
+.BR gh (1)
+for the actual work. It is safe by design: the passphrase is piped via stdin
+(never a CLI arg), the private key is held in memory only (never written to
+disk), and the GitHub token is read from an environment variable (never a
+flag). See
+.B SECURITY
+below and
+.I docs/en/security.md
+for the full threat model.
+.SH COMMANDS
+.TP
+.BR detect
+List existing GPG secret keys in the local keyring, or print a hint to run
+.BR generate .
+.TP
+.BR generate
+Generate a new GPG key via
+.B "gpg --gen-key"
+with a batch parameter file. Passphrase is collected via a masked prompt
+unless
+.B \-\-passphrase-file
+is given.
+.TP
+.BR export
+Export the ASCII-armored public key to a file (default
+.IR gpg-public-key.asc )
+and capture the private key in memory for the
+.B github
+step.
+.TP
+.BR git\-config
+Set
+.BR user.signingkey ,
+.BR commit.gpgsign ,
+.BR gpg.format ,
+and
+.BR tag.gpgsign
+in the local repo (or
+.B \-\-global
+user config) to sign commits and tags.
+.TP
+.BR github
+Upload the GPG public key to your GitHub account, store the private key and
+passphrase as repository secrets
+.RI ( GPG_PRIVATE_KEY
+and
+.IR GPG_PASSPHRASE ),
+commit the public key on a
+.I chore/add-gpg-public-key
+branch, and open a pull request.
+.TP
+.BR publish
+Publish the GPG public key to one or more public keyservers (default
+.IR all :
+keys.openpgp.org and keyserver.ubuntu.com).
+.TP
+.BR status
+Show the current state of your GPG + GitHub setup with per-step
+\(rh/\(rh/\(rh indicators: GPG keys, git config, GitHub pubkey, repo secrets,
+and keyserver publication.
+.TP
+.BR wizard
+Run the full setup flow end-to-end: detect, generate, export, git-config,
+github, publish. Each step prompts for confirmation and writes progress to
+.I state.json
+so a failed run can be resumed.
+.TP
+.BR config
+Manage the config file at
+.IR ~/.config/gpg-keysmith/config.yaml .
+Subcommands:
+.B init
+(write a commented template),
+.B show
+(print the current config),
+.B path
+(print the config file path).
+.TP
+.BR completion
+Generate a shell autocompletion script. Subcommands:
+.BR bash ,
+.BR zsh ,
+.BR fish ,
+.BR powershell .
+.SH OPTIONS
+.TP
+.BR \-\-config = path
+Path to the config file (default
+.IR ~/.config/gpg-keysmith/config.yaml ).
+Applies to all commands.
+.TP
+.BR \-h ,\  \-\-help
+Print help for
+.B keysmith
+or for a specific subcommand.
+.PP
+Each subcommand accepts its own flags; run
+.B keysmith <command> \-\-help
+for the full list. Notable per-command flags:
+.TP
+.B generate \-\-name , \-\-email , \-\-comment , \-\-key-length , \-\-expiry , \-\-passphrase-file
+Identity and parameters for the new key.
+.TP
+.B export \-\-keyid , \-\-email , \-\-pubkey , \-\-passphrase-file
+Select the key to export and the output path.
+.TP
+.B github \-\-repo , \-\-keyid , \-\-pubkey-file
+Target repository and key selection.
+.TP
+.B publish \-\-keyid , \-\-keyserver , \-\-pubkey-file
+Keyserver target:
+.IR all ,
+.IR openpgp ,
+or
+.IR ubuntu .
+.TP
+.B status \-\-repo , \-\-keyserver , \-\-fingerprint
+Inspect a specific repo or keyserver.
+.TP
+.B wizard \-\-name , \-\-email , \-\-comment , \-\-repo , \-\-key-length , \-\-expiry , \-\-keyserver , \-\-passphrase-file , \-\-state-path , \-\-reset
+Pre-fill the wizard prompts or reset the state file.
+.SH EXAMPLES
+.TP
+.B keysmith wizard
+Run the full end-to-end setup interactively, resumable on failure.
+.TP
+.B keysmith generate \-\-name \(dqJane Doe\(dq \-\-email jane@example.com \-\-passphrase-file /dev/stdin
+Generate a new key non-interactively, reading the passphrase from stdin
+(for CI/script usage with no TTY).
+.TP
+.B keysmith status \-\-repo owner/name
+Show which setup steps are green for the given repository.
+.TP
+.B keysmith config init
+Write a commented config template to
+.IR ~/.config/gpg-keysmith/config.yaml .
+.SH FILES
+.TP
+.I ~/.config/gpg-keysmith/config.yaml
+Persistent defaults for key generation, keyserver choice, and the GitHub
+PAT env-var name. Mode
+.IR 0600 .
+Created by
+.B config init .
+.TP
+.I ~/.config/gpg-keysmith/state.json
+Wizard resume state. Written after each completed step, cleared on full
+completion. Never contains the passphrase or private key.
+.SH ENVIRONMENT
+.TP
+.B GITHUB_TOKEN
+Default GitHub personal access token (read by the
+.B github
+and
+.B status
+commands). Must have
+.I admin:gpg_key
+and
+.I repo
+scopes for
+.BR github .
+.TP
+.B GH_TOKEN
+Fallback token, used when
+.B GITHUB_TOKEN
+is unset. The env var name can be changed via
+.B config.github.token_env
+in the config file.
+.TP
+.B XDG_CONFIG_HOME
+Overrides the config directory; the config and state files move to
+.IR $XDG_CONFIG_HOME/gpg-keysmith/ .
+Defaults to
+.I ~/.config
+when unset.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Any error \(em missing dependency, failed
+.BR gpg / git / gh
+invocation, validation failure, or interrupted prompt.
+.SH SECURITY
+The passphrase, private key, and GitHub token never cross a leak surface:
+the passphrase is piped to
+.B gpg
+via stdin, the private key is held in memory only, and the token is read
+from an environment variable. There is no
+.B \-\-passphrase
+or
+.B \-\-token
+flag by design. See
+.I docs/en/security.md
+for the full threat model.
+.SH SEE ALSO
+.BR gpg (1),
+.BR git (1),
+.BR gh (1)
+.SH BUGS
+Report bugs and feature requests at
+.UR https://github.com/Korrnals/gpg-keysmith/issues
+.UE .
+For security issues, see the responsible disclosure process in
+.IR docs/en/security.md .
+.SH AUTHOR
+Leonid Golikhin <korrnals@gmail.com>
+.SH LICENSE
+MIT \(em see
+.I LICENSE
+for the full text. Copyright (c) 2026 Leonid Golikhin.

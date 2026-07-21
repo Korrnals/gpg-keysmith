@@ -120,7 +120,7 @@ Pull requests welcome. Before submitting:
 make ci     # mod verify + fmt + vet + build + test — must be green
 ```
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. The project uses a 10-milestone roadmap (all milestones complete as of v0.7.0); see [DEVELOPMENT.md](./DEVELOPMENT.md) for the original plan.
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full contributor guide — prerequisites, development workflow, local CI, testing conventions, architecture, and security invariants. Follow [Conventional Commits](https://www.conventionalcommits.org/) for commit messages. The original 10-milestone roadmap (all milestones complete as of v0.7.0) lives in [DEVELOPMENT.md](./DEVELOPMENT.md).
 
 ## License
 

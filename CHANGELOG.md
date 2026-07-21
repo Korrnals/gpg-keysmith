@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- M15: polish — `CONTRIBUTING.md` contributor guide + `keysmith.1` man page; fixed README contributing link to point to `CONTRIBUTING.md`
+
 ## [1.1.1] — 2026-07-21
 
 ### Added
