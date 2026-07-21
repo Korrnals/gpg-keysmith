@@ -14,34 +14,49 @@
 ## Quick start
 
 ```bash
-git clone https://github.com/Korrnals/gpg-keysmith.git
-cd gpg-keysmith
-make install              # builds + installs to ~/.local/bin, checks gpg/git/gh, sets up PATH
+curl -fsSL https://raw.githubusercontent.com/Korrnals/gpg-keysmith/main/install.sh | bash
 export GITHUB_TOKEN=ghp_your_pat_with_repo_admin_gpg_key
 keysmith wizard
 ```
 
-The wizard guides you through every step interactively and resumes from the last completed step if it fails.
-
-Prefer the Go-native path? `go install github.com/Korrnals/gpg-keysmith/cmd/keysmith@latest` (installs to `$GOBIN`, no dependency/PATH checks).
+The one-line installer downloads a fresh binary from the latest GitHub release (matched to your OS/arch), verifies the SHA-256 checksum, installs `keysmith` to `~/.local/bin`, and ensures it is on your `PATH`. The wizard then guides you through every step interactively and resumes from the last completed step if it fails.
 
 ## Installation
 
-### From source (recommended for development)
+### One-line installer (recommended)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Korrnals/gpg-keysmith/main/install.sh | bash
+```
+
+The installer auto-detects your OS (Linux/macOS) and arch (amd64/arm64), downloads the matching binary from the [latest release](https://github.com/Korrnals/gpg-keysmith/releases), verifies the SHA-256 checksum, installs to `~/.local/bin` (edit your shell rc to add it to `PATH` if needed), and checks that the runtime dependencies (`gpg`, `git`, `gh`) are present.
+
+Options:
+
+```bash
+# pin a specific version
+curl -fsSL https://raw.githubusercontent.com/Korrnals/gpg-keysmith/main/install.sh | bash -s -- --version v1.3.0
+# install system-wide (requires write access to /usr/local/bin)
+curl -fsSL https://raw.githubusercontent.com/Korrnals/gpg-keysmith/main/install.sh | bash -s -- --install-dir /usr/local/bin
+# private repo: export GH_TOKEN (or GITHUB_TOKEN) first
+```
+
+<details>
+<summary>Other install methods</summary>
+
+#### From source (`make install`)
+
+Builds keysmith from source, installs to `~/.local/bin`, auto-installs `gpg`/`git`/`gh` via apt/dnf/pacman/brew, and sets up `PATH`. Requires Go 1.22+.
 
 ```bash
 git clone https://github.com/Korrnals/gpg-keysmith.git
 cd gpg-keysmith
-make install   # smart install: builds, installs to ~/.local/bin, checks deps, sets up PATH
-```
-
-To install system-wide (requires write access to /usr/local/bin):
-
-```bash
+make install   # smart install: builds, installs, checks deps, sets up PATH, verifies --version
+# system-wide (requires write access to /usr/local/bin):
 make install INSTALL_DIR=/usr/local/bin
 ```
 
-### From a release binary
+#### From a release binary (manual)
 
 Download the binary for your platform from [GitHub Releases](https://github.com/Korrnals/gpg-keysmith/releases), verify its SHA-256 checksum, and put it on your `PATH`:
 
@@ -50,11 +65,15 @@ chmod +x keysmith
 sudo mv keysmith /usr/local/bin/
 ```
 
-### Via `go install`
+#### Via `go install`
 
 ```bash
 go install github.com/Korrnals/gpg-keysmith/cmd/keysmith@latest
 ```
+
+Installs to `$GOBIN` (or `$GOPATH/bin`). No dependency or `PATH` checks — bring your own `gpg`/`git`/`gh`.
+
+</details>
 
 ### Runtime dependencies
 
