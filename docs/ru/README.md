@@ -78,7 +78,7 @@ Pull request'ы приветствуются. Перед отправкой за
 make ci     # проверка модулей + fmt + vet + build + test — должно быть зелёным
 ```
 
-Соблюдайте [Conventional Commits](https://www.conventionalcommits.org/) в сообщениях коммитов. Исходный 10-этапный план разработки — в [DEVELOPMENT.md](../../DEVELOPMENT.md).
+Соблюдайте [Conventional Commits](https://www.conventionalcommits.org/) в сообщениях коммитов. Полное руководство для контрибьюторов — в [CONTRIBUTING.md](../../CONTRIBUTING.md); исходный 10-этапный план разработки — в [DEVELOPMENT.md](../../DEVELOPMENT.md).
 
 ## Лицензия
 
