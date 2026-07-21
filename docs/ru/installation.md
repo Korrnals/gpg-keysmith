@@ -44,12 +44,30 @@ winget install --id GitHub.cli
 
 ## Установка keysmith
 
+### Установка одной командой (рекомендуется)
+
+`make install` собирает keysmith, устанавливает его в `~/.local/bin` (этот каталог уже есть в PATH на большинстве систем), проверяет наличие `gpg`/`git`/`gh` и при необходимости автоматически устанавливает их через ваш пакетный менеджер, а также добавляет `~/.local/bin` в PATH вашей оболочки.
+
+```bash
+git clone https://github.com/Korrnals/gpg-keysmith.git
+cd gpg-keysmith
+make install
+```
+
+Для системной установки (нужны права на запись в /usr/local/bin):
+
+```bash
+make install INSTALL_DIR=/usr/local/bin
+```
+
+Установщик автоматически определяет ОС (Linux/macOS) и оболочку (bash/zsh/fish). На Linux используются `apt`/`dnf`/`pacman` для зависимостей; на macOS — Homebrew. Если пакетному менеджеру нужны права root, команда выводится для ручного запуска через `sudo` — сам `make install` работает в пользовательском пространстве.
+
 ### Из исходников (рекомендуется для разработки)
 
 ```bash
 git clone https://github.com/Korrnals/gpg-keysmith.git
 cd gpg-keysmith
-make install   # устанавливает в $GOBIN (или $GOPATH/bin)
+make install   # устанавливает в ~/.local/bin (умная установка: проверка зависимостей + настройка PATH)
 ```
 
 Локальная сборка без установки:

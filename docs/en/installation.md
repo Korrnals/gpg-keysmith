@@ -44,12 +44,30 @@ winget install --id GitHub.cli
 
 ## Installing keysmith
 
+### One-command install (recommended)
+
+`make install` builds keysmith, installs it to `~/.local/bin` (in PATH on most systems), checks for `gpg`/`git`/`gh` and auto-installs them via your package manager if missing, and ensures `~/.local/bin` is in your shell's PATH.
+
+```bash
+git clone https://github.com/Korrnals/gpg-keysmith.git
+cd gpg-keysmith
+make install
+```
+
+To install system-wide (requires write access to /usr/local/bin):
+
+```bash
+make install INSTALL_DIR=/usr/local/bin
+```
+
+The installer detects your OS (Linux/macOS) and shell (bash/zsh/fish) automatically. On Linux it uses `apt`/`dnf`/`pacman` for dependencies; on macOS it uses Homebrew. If a package manager needs root, the command is printed for you to run with `sudo` — `make install` itself runs user-space.
+
 ### From source (recommended for development)
 
 ```bash
 git clone https://github.com/Korrnals/gpg-keysmith.git
 cd gpg-keysmith
-make install   # installs to $GOBIN (or $GOPATH/bin)
+make install   # installs to ~/.local/bin (smart install: deps check + PATH setup)
 ```
 
 To build a local binary without installing:

@@ -14,12 +14,16 @@
 ## Quick start
 
 ```bash
-go install github.com/Korrnals/gpg-keysmith/cmd/keysmith@latest
+git clone https://github.com/Korrnals/gpg-keysmith.git
+cd gpg-keysmith
+make install              # builds + installs to ~/.local/bin, checks gpg/git/gh, sets up PATH
 export GITHUB_TOKEN=ghp_your_pat_with_repo_admin_gpg_key
 keysmith wizard
 ```
 
 The wizard guides you through every step interactively and resumes from the last completed step if it fails.
+
+Prefer the Go-native path? `go install github.com/Korrnals/gpg-keysmith/cmd/keysmith@latest` (installs to `$GOBIN`, no dependency/PATH checks).
 
 ## Installation
 
@@ -28,7 +32,13 @@ The wizard guides you through every step interactively and resumes from the last
 ```bash
 git clone https://github.com/Korrnals/gpg-keysmith.git
 cd gpg-keysmith
-make install   # installs to $GOBIN (or $GOPATH/bin)
+make install   # smart install: builds, installs to ~/.local/bin, checks deps, sets up PATH
+```
+
+To install system-wide (requires write access to /usr/local/bin):
+
+```bash
+make install INSTALL_DIR=/usr/local/bin
 ```
 
 ### From a release binary
