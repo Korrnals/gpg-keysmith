@@ -26,6 +26,7 @@ package wizard
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -90,6 +91,18 @@ type WizardState struct {
 	// Repo is the owner/name of the target GitHub repo once the
 	// github step has run (or is about to run).
 	Repo string `json:"repo"`
+	// GithubKeyID records the integer key id GitHub assigned to the
+	// uploaded GPG public key (the id field of the /user/gpg_keys
+	// response). Populated when the github step succeeds OR when
+	// the preflight finds the subkey already on the account (the
+	// 2026-07-22 dogfooded case). Optional: omitted when the user
+	// has not yet reached the github step. When set, a re-run of
+	// the wizard recognises the github step as already-done at
+	// the seam BEFORE the upload — even if CompletedSteps was
+	// cleared (e.g. by manual intervention), the preflight
+	// short-circuits the POST. Use omitempty so old state files
+	// without the field still parse.
+	GithubKeyID string `json:"github_key_id,omitempty"`
 	// StatePath is where the state is persisted. It is populated by
 	// LoadState / RunWizard and used by SaveState.
 	StatePath string `json:"-"`
@@ -438,12 +451,54 @@ func stepGitConfig(state *WizardState, opts WizardOptions) error {
 // github.SetGPGSecrets, and github.CommitPublicKeyFile. It sets
 // state.Repo on success. The private key and passphrase come from
 // state (held in memory, never persisted).
+//
+// When the upload returns *github.ErrKeyAlreadyExists (the subkey is
+// already on the account — the 2026-07-22 dogfooded case), the
+// step records the existing GitHub key id in state.GithubKeyID,
+// prints an info message, and returns nil so the orchestrator
+// marks the step done. The follow-up steps (setGPGSecrets,
+// commit+PR) are still attempted because the user has not yet
+// configured them; if they have already been run they no-op on
+// GitHub's side (gh secret set is idempotent; committing a public
+// key the repo already has will fail in a non-retryable way and
+// the wizard will surface that as a normal retry/skip/abort).
 func stepGitHub(state *WizardState, opts WizardOptions) error {
 	if state.KeyID == "" {
 		return fmt.Errorf("github: no key id available")
 	}
 	if state.PubKeyArmor == "" {
 		return fmt.Errorf("github: no public key armor in memory (run export first)")
+	}
+	// Re-run short-circuit: on a re-run with
+	// state.GithubKeyID set, the subkey was already confirmed
+	// on the account in a prior run. We skip the entire step
+	// (upload + secrets + PR) — none of them would do useful
+	// work:
+	//   - upload: the POST is guaranteed to 422 again with the
+	//     same subkey-already-exists body.
+	//   - secrets: gh secret set is idempotent but produces
+	//     redundant network traffic and noisy "already set"
+	//     output on the user's terminal.
+	//   - PR: committing a public key the repo already has is
+	//     not a no-op — `gh pr create` will fail with a
+	//     "nothing to commit" error and surface a confusing
+	//     retry prompt.
+	// So we skip everything for correctness (no false error to
+	// the operator) and for observability (no spurious "already
+	// set" output). The step is recorded as done; state.Repo is
+	// preserved so downstream steps know the target.
+	//
+	// This branch is reached only when the prior runWizard
+	// recorded state.GithubKeyID (after a 422 fallback). If
+	// the prior run failed mid-step, the state file does not
+	// contain GithubKeyID and the normal path below runs.
+	if state.GithubKeyID != "" {
+		fmt.Printf("      Public key already on GitHub as key %s (recorded in state). Skipping upload.\n",
+			state.GithubKeyID)
+		if opts.Repo != "" {
+			state.Repo = opts.Repo
+		}
+		return nil
 	}
 	// Resolve repo. opts.Repo > state.Repo > survey prompt.
 	repo := opts.Repo
@@ -501,10 +556,35 @@ func stepGitHub(state *WizardState, opts WizardOptions) error {
 
 	fmt.Println("  ==> Uploading public key to GitHub...")
 	uploadedFP, err := githubUploadPublicKeyFn(token, state.PubKeyArmor, fingerprint)
-	if err != nil {
+	// *github.ErrKeyAlreadyExists is the typed "the subkey is
+	// already on the account" signal. The 2026-07-22 dogfooded case
+	// is exactly this: korrnals added a GPG key to GitHub for
+	// commit signing, then ran the wizard on the gpg-keysmith repo
+	// itself. The subkey was already on the account; GitHub
+	// returned 422 with `code: custom` + "one or more subkeys
+	// already exist". Treat as success: record the existing key
+	// id in state (so a re-run short-circuits the upload), print
+	// an info line, and continue to the secrets + PR steps. We
+	// deliberately do NOT offer retry — the server-side state
+	// will not change between retries.
+	var keyExists *github.ErrKeyAlreadyExists
+	switch {
+	case err == nil:
+		// Normal upload succeeded.
+		fmt.Printf("      Public key uploaded (fingerprint: %s)\n", uploadedFP)
+	case errors.As(err, &keyExists):
+		// Subkey already on the account under another key. The
+		// signing pipeline will work — the goal of this step is
+		// achieved. Persist the discovered key id so a re-run
+		// does not even attempt the upload (the preflight at
+		// the top of this function short-circuits on the
+		// second run).
+		state.GithubKeyID = keyExists.KeyID
+		fmt.Printf("      Public key subkey %s is already on GitHub as key %s (%s). Marking github step as done.\n",
+			keyExists.Fingerprint, keyExists.KeyID, strings.Join(keyExists.Emails, ", "))
+	default:
 		return fmt.Errorf("github: upload public key: %w", err)
 	}
-	fmt.Printf("      Public key uploaded (fingerprint: %s)\n", uploadedFP)
 
 	fmt.Println("  ==> Setting repo secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE...")
 	if err := githubSetGPGSecretsFn(token, owner, name, state.PrivateKey, state.Passphrase); err != nil {
