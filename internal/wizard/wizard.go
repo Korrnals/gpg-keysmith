@@ -312,6 +312,7 @@ var (
 	githubUploadPublicKeyFn     = github.UploadPublicKeyWithFingerprint
 	githubSetGPGSecretsFn       = github.SetGPGSecrets
 	githubCommitPublicKeyFileFn = github.CommitPublicKeyFile
+	githubListUserGpgKeysFn     = github.ListUserGpgKeys
 	keyserverPublishPubKeyFn    = keyserver.PublishPubKey
 )
 
@@ -500,6 +501,39 @@ func stepGitConfig(state *WizardState, opts WizardOptions) error {
 // GitHub's side (gh secret set is idempotent; committing a public
 // key the repo already has will fail in a non-retryable way and
 // the wizard will surface that as a normal retry/skip/abort).
+// resolveGitHubToken resolves the GitHub PAT from WizardOptions and
+// the environment, prompting via survey as a last resort. Resolution
+// order: opts.GitHubToken > env var named by opts.GitHubTokenEnv
+// (default GITHUB_TOKEN) > GH_TOKEN env var > survey.Password prompt.
+// The token is NEVER read from a CLI flag (S1) and the env var name
+// is configurable via config.github.token_env (S5).
+//
+// Extracted from stepGitHub so the re-run short-circuit re-validation
+// (issue #22) can resolve the token without duplicating the chain.
+func resolveGitHubToken(opts WizardOptions) (string, error) {
+	token := opts.GitHubToken
+	if token == "" {
+		primary := opts.GitHubTokenEnv
+		if primary == "" {
+			primary = "GITHUB_TOKEN"
+		}
+		token = os.Getenv(primary)
+	}
+	if token == "" {
+		token = os.Getenv("GH_TOKEN")
+	}
+	if token == "" {
+		prompt := &survey.Password{Message: "GitHub PAT (admin:gpg_key + repo):"}
+		if err := survey.AskOne(prompt, &token); err != nil {
+			return "", fmt.Errorf("github: token prompt: %w", err)
+		}
+	}
+	if token == "" {
+		return "", fmt.Errorf("github: token is required")
+	}
+	return token, nil
+}
+
 func stepGitHub(state *WizardState, opts WizardOptions) error {
 	if state.KeyID == "" {
 		return fmt.Errorf("github: no key id available")
@@ -530,13 +564,69 @@ func stepGitHub(state *WizardState, opts WizardOptions) error {
 	// recorded state.GithubKeyID (after a 422 fallback). If
 	// the prior run failed mid-step, the state file does not
 	// contain GithubKeyID and the normal path below runs.
+	//
+	// Re-validation (issue #22): before trusting the cached
+	// key id, confirm it is still on the account under the
+	// current token. If the token has been rotated, the key
+	// has been deleted from GitHub, or the state file was
+	// authored by a different account, the cached id no
+	// longer refers to a key the current token can see —
+	// silently skipping would mis-inform the user and proceed
+	// to setGPGSecrets / commitPublicKeyFile on the wrong
+	// account. This mirrors the defence the 422-fallback path
+	// already applies (it calls listUserGpgKeys after a 422
+	// to confirm which key holds the subkey).
 	if state.GithubKeyID != "" {
-		fmt.Printf("      Public key already on GitHub as key %s (recorded in state). Skipping upload.\n",
-			state.GithubKeyID)
-		if opts.Repo != "" {
-			state.Repo = opts.Repo
+		token, terr := resolveGitHubToken(opts)
+		if terr != nil {
+			// No token available — we cannot re-validate.
+			// Be lenient (match the network-error policy
+			// below): trust the state, short-circuit as
+			// today. The follow-up steps would re-prompt
+			// for the token if they actually ran, but we
+			// are skipping them, so the missing token is
+			// not surfaced here.
+			fmt.Printf("      ⚠️ Could not re-validate GitHub key %s (no token available: %v). Trusting state.\n",
+				state.GithubKeyID, terr)
+			if opts.Repo != "" {
+				state.Repo = opts.Repo
+			}
+			return nil
 		}
-		return nil
+		keys, lerr := githubListUserGpgKeysFn(token)
+		if lerr != nil {
+			// Network / API error — be lenient,
+			// trust the state, log a warning, and
+			// short-circuit. This matches the issue's
+			// proposed policy: a transient API failure
+			// must not force a redundant upload the user
+			// cannot verify either.
+			fmt.Printf("      ⚠️ Could not re-validate GitHub key %s (network error: %v). Trusting state.\n",
+				state.GithubKeyID, lerr)
+			if opts.Repo != "" {
+				state.Repo = opts.Repo
+			}
+			return nil
+		}
+		if github.FindExistingByKeyID(keys, state.GithubKeyID) == nil {
+			// The cached key id is no longer on the
+			// account under the current token. Clear
+			// it and fall through to the normal
+			// upload path so the user is correctly
+			// informed and the upload runs against
+			// the current account.
+			fmt.Printf("      ⚠️ GitHub key %s is no longer on the account under the current token. Re-running upload.\n",
+				state.GithubKeyID)
+			state.GithubKeyID = ""
+		} else {
+			// Key confirmed — short-circuit as today.
+			fmt.Printf("      Public key already on GitHub as key %s (confirmed via API). Skipping upload.\n",
+				state.GithubKeyID)
+			if opts.Repo != "" {
+				state.Repo = opts.Repo
+			}
+			return nil
+		}
 	}
 	// Resolve repo. opts.Repo > state.Repo > survey prompt.
 	repo := opts.Repo
@@ -560,25 +650,9 @@ func stepGitHub(state *WizardState, opts WizardOptions) error {
 	// > survey prompt. The token is NEVER read from a CLI flag (S1)
 	// and the env var name is configurable via config.github.token_env
 	// (S5).
-	token := opts.GitHubToken
-	if token == "" {
-		primary := opts.GitHubTokenEnv
-		if primary == "" {
-			primary = "GITHUB_TOKEN"
-		}
-		token = os.Getenv(primary)
-	}
-	if token == "" {
-		token = os.Getenv("GH_TOKEN")
-	}
-	if token == "" {
-		prompt := &survey.Password{Message: "GitHub PAT (admin:gpg_key + repo):"}
-		if err := survey.AskOne(prompt, &token); err != nil {
-			return fmt.Errorf("github: token prompt: %w", err)
-		}
-	}
-	if token == "" {
-		return fmt.Errorf("github: token is required")
+	token, err := resolveGitHubToken(opts)
+	if err != nil {
+		return err
 	}
 
 	// Look up the fingerprint from detect for dedup.

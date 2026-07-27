@@ -294,3 +294,39 @@ func TestNormaliseFingerprint(t *testing.T) {
 		}
 	}
 }
+
+// TestFindExistingByKeyID covers the helper the wizard's re-run
+// short-circuit (issue #22) uses to confirm a cached state.GithubKeyID
+// still refers to a key on the account under the current token.
+func TestFindExistingByKeyID(t *testing.T) {
+	keys := []GpgKeyRef{
+		{ID: 11111, KeyID: "AAA"},
+		{ID: 72834, KeyID: "ABC123"},
+		{ID: 99999, KeyID: "ZZZ"},
+	}
+	cases := []struct {
+		name string
+		id   string
+		want int64 // 0 means nil
+	}{
+		{"hit", "72834", 72834},
+		{"miss", "12345", 0},
+		{"empty id", "", 0},
+		{"non-numeric id", "ABC123", 0}, // KeyID is hex, not the integer ID
+		{"first in list", "11111", 11111},
+		{"last in list", "99999", 99999},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := FindExistingByKeyID(keys, c.id)
+			switch {
+			case c.want == 0 && got != nil:
+				t.Errorf("FindExistingByKeyID(%q) = %+v, want nil", c.id, got)
+			case c.want != 0 && got == nil:
+				t.Errorf("FindExistingByKeyID(%q) = nil, want ID %d", c.id, c.want)
+			case c.want != 0 && got.ID != c.want:
+				t.Errorf("FindExistingByKeyID(%q) = ID %d, want %d", c.id, got.ID, c.want)
+			}
+		})
+	}
+}

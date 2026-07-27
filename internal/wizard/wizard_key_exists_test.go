@@ -108,6 +108,16 @@ func TestRunGithubStep_KeyAlreadyExists_RerunShortCircuits(t *testing.T) {
 	githubCommitPublicKeyFileFn = func(string, string, string, string) (string, error) {
 		return "https://github.com/owner/repo/pull/1", nil
 	}
+	// Re-validation (issue #22): stepGitHub now calls
+	// ListUserGpgKeys before short-circuiting. Inject a mock
+	// that confirms the cached key id is still on the account
+	// so the short-circuit path is taken.
+	githubListUserGpgKeysFn = func(token string) ([]github.GpgKeyRef, error) {
+		return []github.GpgKeyRef{{
+			ID:    72834,
+			KeyID: "ABC123",
+		}}, nil
+	}
 
 	state := &WizardState{
 		KeyID:       "FD910BA1AF89641A",
@@ -341,5 +351,160 @@ func TestRunWizard_KeyAlreadyExists_ErrorNotSurfaced(t *testing.T) {
 			t.Errorf("RunWizard error mentions subkey — typed error leaked: %v", err)
 		}
 		t.Fatalf("RunWizard returned unexpected error: %v", err)
+	}
+}
+
+// TestRunGithubStep_RevalidationFails_FallsThroughToUpload covers
+// issue #22: when state.GithubKeyID is set but the key is no longer
+// on the account under the current token (token rotated, key
+// deleted, or state authored by a different account), stepGitHub
+// must NOT silently skip. It must clear state.GithubKeyID and fall
+// through to the normal upload path so the user is correctly
+// informed and the upload runs against the current account.
+//
+// The re-validation mirrors the defence the 422-fallback path
+// already applies (it calls listUserGpgKeys after a 422 to confirm
+// which key holds the subkey).
+func TestRunGithubStep_RevalidationFails_FallsThroughToUpload(t *testing.T) {
+	defer saveStepFns()()
+
+	// ListUserGpgKeys returns a key set that does NOT contain the
+	// cached key id 72834. This simulates: token rotated, key
+	// deleted, or state authored by a different account.
+	githubListUserGpgKeysFn = func(token string) ([]github.GpgKeyRef, error) {
+		return []github.GpgKeyRef{{
+			ID:    11111,
+			KeyID: "OTHER",
+		}}, nil
+	}
+
+	uploadCalled := false
+	githubUploadPublicKeyFn = func(token, armor, fingerprint string) (string, error) {
+		uploadCalled = true
+		// Normal upload succeeds — the re-run is now treated as
+		// a fresh upload against the current account.
+		return "fd910ba1af89641afd910ba1af89641afd910ba1", nil
+	}
+	githubSetGPGSecretsFn = func(string, string, string, string, string) error { return nil }
+	githubCommitPublicKeyFileFn = func(string, string, string, string) (string, error) {
+		return "https://github.com/owner/repo/pull/1", nil
+	}
+
+	state := &WizardState{
+		KeyID:       "FD910BA1AF89641A",
+		PubKeyArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCK\n-----END-----",
+		PrivateKey:  "-----BEGIN PGP PRIVATE KEY BLOCK-----\nMOCK\n-----END-----",
+		Passphrase:  "gh-pass",
+		// Pre-set as if a prior run recorded the key id, but
+		// the key is no longer on the account under the
+		// current token.
+		GithubKeyID: "72834",
+	}
+	opts := WizardOptions{
+		Repo:        "owner/repo",
+		GitHubToken: "ghp-token",
+	}
+
+	if err := stepGitHub(state, opts); err != nil {
+		t.Fatalf("stepGitHub revalidation fall-through: %v", err)
+	}
+	// The cached key id must be cleared — silently keeping it
+	// would mis-inform the user on the next re-run.
+	if state.GithubKeyID != "" {
+		t.Errorf("state.GithubKeyID = %q, want empty (cleared after re-validation failed)", state.GithubKeyID)
+	}
+	// The normal upload path must have run.
+	if !uploadCalled {
+		t.Fatal("uploadPublicKeyFn was NOT called — stepGitHub silently skipped after re-validation failed")
+	}
+}
+
+// TestRunGithubStep_RevalidationNetworkError_TrustsState covers the
+// lenient branch of issue #22: when ListUserGpgKeys returns a
+// network/API error, stepGitHub must trust the cached state and
+// short-circuit (a transient API failure must not force a redundant
+// upload the user cannot verify either). A warning is logged.
+func TestRunGithubStep_RevalidationNetworkError_TrustsState(t *testing.T) {
+	defer saveStepFns()()
+
+	// ListUserGpgKeys returns a network error.
+	githubListUserGpgKeysFn = func(token string) ([]github.GpgKeyRef, error) {
+		return nil, errors.New("dial tcp: connection refused")
+	}
+
+	// The upload MUST NOT be called — the short-circuit trusts
+	// the state on network error.
+	githubUploadPublicKeyFn = func(token, armor, fingerprint string) (string, error) {
+		t.Fatal("uploadPublicKeyFn must NOT be called when re-validation hits a network error (lenient short-circuit)")
+		return "", nil
+	}
+	githubSetGPGSecretsFn = func(string, string, string, string, string) error { return nil }
+	githubCommitPublicKeyFileFn = func(string, string, string, string) (string, error) {
+		return "https://github.com/owner/repo/pull/1", nil
+	}
+
+	state := &WizardState{
+		KeyID:       "FD910BA1AF89641A",
+		PubKeyArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCK\n-----END-----",
+		PrivateKey:  "-----BEGIN PGP PRIVATE KEY BLOCK-----\nMOCK\n-----END-----",
+		Passphrase:  "gh-pass",
+		GithubKeyID: "72834",
+	}
+	opts := WizardOptions{
+		Repo:        "owner/repo",
+		GitHubToken: "ghp-token",
+	}
+
+	if err := stepGitHub(state, opts); err != nil {
+		t.Fatalf("stepGitHub network-error lenient: %v", err)
+	}
+	// The cached key id must be preserved (lenient trust).
+	if state.GithubKeyID != "72834" {
+		t.Errorf("state.GithubKeyID = %q, want %q (preserved on network error)", state.GithubKeyID, "72834")
+	}
+}
+
+// TestRunGithubStep_RevalidationConfirms_ShortCircuits covers the
+// happy branch of issue #22: when ListUserGpgKeys confirms the
+// cached key id is still on the account, stepGitHub short-circuits
+// as before (no upload). This complements
+// TestRunGithubStep_KeyAlreadyExists_RerunShortCircuits, which now
+// also injects a confirming list — this test makes the confirmation
+// explicit and asserts the upload is NOT called.
+func TestRunGithubStep_RevalidationConfirms_ShortCircuits(t *testing.T) {
+	defer saveStepFns()()
+
+	githubListUserGpgKeysFn = func(token string) ([]github.GpgKeyRef, error) {
+		return []github.GpgKeyRef{{
+			ID:    72834,
+			KeyID: "ABC123",
+		}}, nil
+	}
+	githubUploadPublicKeyFn = func(token, armor, fingerprint string) (string, error) {
+		t.Fatal("uploadPublicKeyFn must NOT be called when re-validation confirms the key")
+		return "", nil
+	}
+	githubSetGPGSecretsFn = func(string, string, string, string, string) error { return nil }
+	githubCommitPublicKeyFileFn = func(string, string, string, string) (string, error) {
+		return "https://github.com/owner/repo/pull/1", nil
+	}
+
+	state := &WizardState{
+		KeyID:       "FD910BA1AF89641A",
+		PubKeyArmor: "-----BEGIN PGP PUBLIC KEY BLOCK-----\nMOCK\n-----END-----",
+		PrivateKey:  "-----BEGIN PGP PRIVATE KEY BLOCK-----\nMOCK\n-----END-----",
+		Passphrase:  "gh-pass",
+		GithubKeyID: "72834",
+	}
+	opts := WizardOptions{
+		Repo:        "owner/repo",
+		GitHubToken: "ghp-token",
+	}
+
+	if err := stepGitHub(state, opts); err != nil {
+		t.Fatalf("stepGitHub confirmed short-circuit: %v", err)
+	}
+	if state.GithubKeyID != "72834" {
+		t.Errorf("state.GithubKeyID = %q, want %q (preserved on confirmation)", state.GithubKeyID, "72834")
 	}
 }

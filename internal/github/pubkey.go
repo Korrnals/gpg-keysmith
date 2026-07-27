@@ -340,6 +340,33 @@ func findExistingByFingerprint(existing []GpgKeyRef, want string) *GpgKeyRef {
 	return nil
 }
 
+// FindExistingByKeyID reports whether any GPG key in existing has the
+// given GitHub integer key id. The id is the same form stored in
+// wizard.WizardState.GithubKeyID and in ErrKeyAlreadyExists.KeyID:
+// the decimal representation of GpgKeyRef.ID (e.g. "72834").
+//
+// Used by the wizard's re-run short-circuit in stepGitHub to
+// re-validate that a cached state.GithubKeyID still refers to a key
+// on the account under the current token (defence against token
+// rotation, key deletion, or a state file authored by a different
+// account). Returns the matching key reference, or nil if no key has
+// the id or id is not a valid decimal integer.
+func FindExistingByKeyID(existing []GpgKeyRef, id string) *GpgKeyRef {
+	if id == "" {
+		return nil
+	}
+	want, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return nil
+	}
+	for i := range existing {
+		if existing[i].ID == want {
+			return &existing[i]
+		}
+	}
+	return nil
+}
+
 // matchSubkeyAlreadyExists parses a 422 body from /user/gpg_keys and
 // reports whether it is the subkey-already-exists case. Returns
 // (subkey_fingerprint, true) when matched, ("", false) otherwise.
