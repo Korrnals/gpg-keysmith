@@ -79,7 +79,7 @@ make build     # produces ./bin/keysmith (UPX-compressed if upx is available)
 ### From a release binary
 
 1. Download the archive for your platform from [GitHub Releases](https://github.com/Korrnals/gpg-keysmith/releases).
-2. Verify the SHA-256 checksum against the `checksums.txt` file published alongside the release:
+2. Verify the SHA-256 checksum against the `checksums-sha256.txt` file published alongside the release:
 
    ```bash
    sha256sum keysmith-*.tar.gz
