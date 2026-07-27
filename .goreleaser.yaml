@@ -49,17 +49,11 @@ builds:
     ldflags:
       - -s -w -X main.version=v{{.Version}}
     hooks:
-      # UPX compression — only on non-darwin binaries (matches old pipeline).
-      # darwin binaries are skipped (UPX cannot reliably compress Apple
-      # Silicon / cross-arch). UPX is optional: if not installed, the hook
-      # is a no-op (post-step checks for upx availability).
       post:
-        - cmd: |
-            if command -v upx >/dev/null 2>&1 && [ "{{ .Os }}" != "darwin" ]; then
-              upx -q --best "{{ .Path }}" >/dev/null 2>&1 && echo "UPX compressed: {{ .Path }}" || echo "UPX skipped (unsupported arch/format): {{ .Path }}"
-            else
-              echo "UPX skipped (darwin or upx missing): {{ .Path }}"
-            fi
+        # UPX compression — non-darwin only (matches old pipeline). Wrapped
+        # in `sh -c` because goreleaser v2 exec's each hook entry directly
+        # and cannot parse a bare shell `if` keyword as the first token.
+        - cmd: "sh -c 'if command -v upx >/dev/null 2>&1 && [ \"{{ .Os }}\" != \"darwin\" ]; then upx -q --best \"{{ .Path }}\" >/dev/null 2>&1 && echo \"UPX compressed: {{ .Path }}\" || echo \"UPX skipped (unsupported arch/format): {{ .Path }}\"; else echo \"UPX skipped (darwin or upx missing): {{ .Path }}\"; fi'"
 
 archives:
   - id: default
