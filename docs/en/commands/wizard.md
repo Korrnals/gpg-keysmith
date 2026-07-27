@@ -91,7 +91,20 @@ keysmith wizard --reset
 
 ## After the wizard
 
-Once `keysmith wizard` finishes, your repo signs commits (`commit.gpgsign=true`). If you restart your shell, `gpg-agent`'s passphrase cache is gone and the next `git commit` may hang on a `pinentry` prompt. See [Caching your GPG passphrase](../../CONTRIBUTING.md#caching-your-gpg-passphrase-for-signed-commits) in `CONTRIBUTING.md` for a non-interactive `PRESET_PASSPHRASE` recipe.
+When `keysmith wizard` completes, your local repo is configured to sign every commit:
+
+- `commit.gpgsign=true` — git signs every commit by default.
+- `user.signingkey=<keyid>` — git signs with the key the wizard generated.
+
+The next `git commit` needs the GPG passphrase. `gpg-agent` caches it, but **the cache does not survive a shell restart by default** — opening a new terminal may trigger a `pinentry` prompt, which can hang in a headless box, CI, or the VS Code integrated terminal.
+
+Two ways to keep signed commits flowing without an interactive prompt:
+
+1. **Preset the passphrase into `gpg-agent`** (interactive workstation). Use `gpg-connect-agent` with `PRESET_PASSPHRASE` to seed the cache non-interactively. See [Caching your GPG passphrase for signed commits](../../CONTRIBUTING.md#caching-your-gpg-passphrase-for-signed-commits) in `CONTRIBUTING.md` for the full recipe (keygrip lookup, hex encoding, `--allow-preset-passphrase` gotcha).
+
+2. **Pass the passphrase via a file** (non-interactive CI / scripted usage). The `--passphrase-file <path>` flag (added in v1.1.0, available on `wizard`, `generate`, and `export`) reads the passphrase from a file instead of a masked survey prompt — no TTY required. File perms warn if looser than `0600`. See [`generate`](./generate.md) for the flag's behaviour; the same flag works on `wizard`.
+
+See also: [State file concurrency model](../security.md#state-file-concurrency) — the wizard state file is single-user, single-process.
 
 ## Per-step behaviour
 
