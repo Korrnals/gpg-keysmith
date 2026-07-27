@@ -70,6 +70,17 @@ Because `exec.Command` does not invoke a shell, there is no shell-injection vect
 
 The wizard state file (`~/.config/gpg-keysmith/state.json`) records only step names, key id, email, and repo. It **never** contains the passphrase or the private key — the `Passphrase`, `PrivateKey`, and `PubKeyArmor` fields on `WizardState` carry the `json:"-"` tag, verified by `TestSaveStateOmitsSecrets`.
 
+### State file concurrency
+
+The wizard state file is **single-user, single-process**. It is not concurrency-safe.
+
+- **Concurrent wizard runs corrupt each other's state.** If two `keysmith wizard` invocations hit the `github` step at the same time (two terminals, or a `keysmith wizard` paused at a survey prompt while a separate `keysmith github` runs), both write to the same `state.json` and the second overwrites the first — including the `GithubKeyID` field.
+- **The `0600` perms protect against other users on the same machine** reading the state, but **not** against the same user running two wizards. Permissions are an access-control boundary, not a concurrency boundary.
+- **Do not share `~/.config/gpg-keysmith/` across users.** A NFS-mounted home directory or a shared `~/.config/gpg-keysmith/` between accounts defeats the single-user assumption and exposes the state file to concurrent writes from different UIDs.
+- **Atomic `SaveState` (PR #32, issue #21) handles torn writes** — a crash mid-write no longer leaves a half-written `state.json`. It does **not** handle concurrent writes from two live processes; the second process still overwrites the first.
+
+Full file-lock concurrency safety is **out of scope for v1.x**. The intended deployment is one user, one wizard run at a time, on a single workstation.
+
 ### Secret-name validation (repo secrets)
 
 `SetRepoSecret` validates the secret name against GitHub's allowed character set (`^[A-Za-z_][A-Za-z0-9_]*$`) before shelling out to `gh secret set`. This prevents a malformed name from being interpolated into a `gh` invocation.
