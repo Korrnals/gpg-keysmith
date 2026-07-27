@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `.goreleaser.yaml`: goreleaser config with 5 cross-compilation targets (linux/darwin × amd64/arm64, windows/amd64), UPX compression on non-darwin binaries, sha256 checksums, and source archive — replicating the artifact set from the old `scripts/build-artifacts.sh` (#28)
+- `.github/workflows/release.yml`: GitHub Actions workflow that runs `goreleaser release` on tag push (`v*`), replacing the manual `scripts/release.sh` build + `gh release create` flow (#28)
+- `.goreleaser.yaml`: commented-out publisher sections for Homebrew (`brews:`), AUR (`aurs:`), and cosign signing (`signs:`) — activate when owner-only infra exists (#26, #27, #29)
+
+### Changed
+- `scripts/release.sh`: reduced to a thin wrapper — bumps `VERSION`, commits, tags, and pushes; no longer builds or uploads artifacts (goreleaser in CI does that on tag push) (#28)
+- `CONTRIBUTING.md`, `docs/ru/CONTRIBUTING.md`: release process section rewritten to describe the two-part flow (local `release.sh` + CI goreleaser) (#28)
+
+### Fixed
+- `docs/{en,ru}/installation.md`: corrected checksum filename from `checksums.txt` to `checksums-sha256.txt` (matches the actual artifact name produced by the release pipeline) (#28)
+
+### Removed
+- `scripts/build-artifacts.sh`: superseded by goreleaser (the script was gitignored/local-only; the goreleaser config is the new source of truth) (#28)
+
 ## [1.4.0] — 2026-07-27
 
 ### Added

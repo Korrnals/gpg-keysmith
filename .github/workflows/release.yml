@@ -1,0 +1,50 @@
+# Release pipeline — goreleaser on tag push.
+# Replaces the manual scripts/release.sh build + gh release create flow.
+# Closes #28.
+#
+# Trigger: push of a tag matching v* (created by scripts/release.sh).
+# scripts/release.sh now only bumps VERSION, commits, tags, and pushes —
+# goreleaser (this workflow) does the build, checksum, source archive,
+# and GitHub Release creation.
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # create GitHub Release + upload assets
+  packages: write   # reserved for future Docker publisher
+
+jobs:
+  release:
+    name: goreleaser release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for changelog generation
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache: true
+
+      - name: Install UPX
+        run: sudo apt-get update && sudo apt-get install -y upx-ucl
+
+      - name: Run goreleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~2'
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Owner-only publisher secrets — uncomment in .goreleaser.yaml
+          # when the infra exists (issues #26, #27, #29):
+          # HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          # AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}

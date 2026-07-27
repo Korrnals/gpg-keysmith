@@ -1,0 +1,183 @@
+# goreleaser config for gpg-keysmith.
+# Replaces scripts/release.sh + scripts/build-artifacts.sh.
+# Closes #28.
+#
+# Pipeline contract (must match the old scripts/build-artifacts.sh):
+#   - 5 cross-compilation targets:
+#       linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64
+#   - UPX compression on non-darwin binaries (linux/amd64, linux/arm64,
+#     windows/amd64); darwin binaries are left uncompressed (UPX cannot
+#     reliably compress Apple Silicon / cross-arch binaries).
+#   - sha256 checksums file named checksums-sha256.txt.
+#   - source archive.
+#   - ldflags: -s -w -X main.version=v{{.Version}}.
+#
+# Owner-only publishers (Homebrew, AUR, cosign) are commented out below.
+# Uncommenting + a CI secret is all that's needed when the infra exists:
+#   - brew   → korrnals/homebrew-tap repo (issue #26)
+#   - aurs   → AUR account + SSH key secret (issue #27)
+#   - signs  → cosign / Sigstore setup (issue #29)
+version: 2
+
+project_name: keysmith
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: keysmith
+    main: ./cmd/keysmith
+    binary: keysmith
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Match the old 5-target matrix from scripts/build-artifacts.sh:
+    # darwin/arm64 IS produced (Apple Silicon), windows/arm64 is NOT.
+    # goreleaser builds the cartesian product (goos × goarch) by default,
+    # so we ignore windows/arm64 to keep the 5-target set.
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version=v{{.Version}}
+    hooks:
+      # UPX compression — only on non-darwin binaries (matches old pipeline).
+      # darwin binaries are skipped (UPX cannot reliably compress Apple
+      # Silicon / cross-arch). UPX is optional: if not installed, the hook
+      # is a no-op (post-step checks for upx availability).
+      post:
+        - cmd: |
+            if command -v upx >/dev/null 2>&1 && [ "{{ .Os }}" != "darwin" ]; then
+              upx -q --best "{{ .Path }}" >/dev/null 2>&1 && echo "UPX compressed: {{ .Path }}" || echo "UPX skipped (unsupported arch/format): {{ .Path }}"
+            else
+              echo "UPX skipped (darwin or upx missing): {{ .Path }}"
+            fi
+
+archives:
+  - id: default
+    # tar.gz for unix, zip for windows — matches conventional Go release layout.
+    name_template: >-
+      {{ .ProjectName }}-v{{ .Version }}-{{ .Os }}-{{ .Arch }}
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - LICENSE
+      - README.md
+      - docs/keysmith.1
+
+checksum:
+  name_template: checksums-sha256.txt
+  algorithm: sha256
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^Merge pull request'
+      - '^Merge branch'
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^style:'
+      - '^ci:'
+  groups:
+    - title: 'New features'
+      regexp: '^feat(\(.+\))?!?:'
+      order: 0
+    - title: 'Bug fixes'
+      regexp: '^fix(\(.+\))?!?:'
+      order: 1
+    - title: 'Refactors'
+      regexp: '^refactor(\(.+\))?!?:'
+      order: 2
+    - title: 'Build / release'
+      regexp: '^build(\(.+\))?!?:'
+      order: 3
+    - title: 'Other'
+      order: 999
+
+release:
+  github:
+    owner: Korrnals
+    name: gpg-keysmith
+  draft: false
+  prerelease: auto
+  name_template: 'v{{.Version}}'
+  header: |
+    ## Release v{{.Version}}
+
+    Artifacts: 5 cross-compiled binaries (linux/darwin × amd64/arm64,
+    windows/amd64), UPX-compressed where supported, with sha256 checksums
+    and source archive. See CHANGELOG.md for details.
+
+# ---------------------------------------------------------------------------
+# Owner-only publishers — commented out pending infra.
+# Uncomment + add the corresponding CI secret when the infra exists.
+# ---------------------------------------------------------------------------
+
+# Homebrew formula auto-publish (issue #26).
+# Requires the korrnals/homebrew-tap repo to exist and a
+# HOMEBREW_TAP_GITHUB_TOKEN secret in the release workflow.
+# brews:
+#   - repository:
+#       owner: korrnals
+#       name: homebrew-tap
+#       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+#     homepage: https://github.com/Korrnals/gpg-keysmith
+#     description: GPG key management CLI for Git and GitHub
+#     license: MIT
+#     install: |
+#       bin.install "keysmith"
+#       man1.install "docs/keysmith.1"
+#     test: |
+#       system "#{bin}/keysmith", "--version"
+
+# AUR package auto-publish (issue #27).
+# Requires an AUR account + SSH deploy key secret (AUR_SSH_PRIVATE_KEY)
+# configured in the release workflow.
+# aurs:
+#   - homepage: https://github.com/Korrnals/gpg-keysmith
+#     description: GPG key management CLI for Git and GitHub
+#     maintainers:
+#       - Korrnals <korrnals@users.noreply.github.com>
+#     license: MIT
+#     private_key: "{{ .Env.AUR_SSH_PRIVATE_KEY }}"
+#     git_url: ssh://aur@aur.archlinux.org/keysmith.git
+#     package: |
+#       # bin
+#       install -Dm755 "./keysmith" "${pkgdir}/usr/bin/keysmith"
+#       # man
+#       install -Dm644 "./docs/keysmith.1" "${pkgdir}/usr/share/man/man1/keysmith.1"
+#       # license
+#       install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/keysmith/LICENSE"
+
+# Cosign / Sigstore binary signing (issue #29).
+# Requires cosign installed in the release workflow + a cosign key or
+# keyless OIDC flow. Handled separately by Senior Security Engineer.
+# signs:
+#   - id: cosign
+#     cmd: cosign
+#     certificate: '${certificate}.pem'
+#     signature: '${signature}.sig'
+#     args:
+#       - sign-blob
+#       - '--output-certificate=${certificate}'
+#       - '--output-signature=${signature}'
+#       - '${artifact}'
+#     artifacts: all
+
+# SBOM (software bill of materials) generation.
+# goreleaser supports syft-based SBOMs natively. Enable when supply-chain
+# hardening lands (issue #29).
+# sboms:
+#   - artifacts: archive

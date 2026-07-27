@@ -79,7 +79,7 @@ make build     # собирает ./bin/keysmith (сжимается UPX, есл
 ### Из релизного бинарника
 
 1. Скачайте архив для вашей платформы с [GitHub Releases](https://github.com/Korrnals/gpg-keysmith/releases).
-2. Проверьте SHA-256 по файлу `checksums.txt`, опубликованному рядом с релизом:
+2. Проверьте SHA-256 по файлу `checksums-sha256.txt`, опубликованному рядом с релизом:
 
    ```bash
    sha256sum keysmith-*.tar.gz

@@ -110,16 +110,21 @@ go test -tags=integration ./...        # только интеграционны
 
 Только **мейнтейнер** нарезает релизы. Контрибьюторам это не нужно.
 
-Процесс релиза — в `scripts/release.sh`: бампит `VERSION` (единый источник истины), обновляет `CHANGELOG.md`, собирает UPX-сжатые артефакты, коммитит, тегает, отправляет и создаёт GitHub Release с артефактами:
+Процесс релиза разделён на две части:
+
+1. **`scripts/release.sh`** (локальный у мейнтейнера, gitignored) — бампит `VERSION` (единый источник истины), обновляет `CHANGELOG.md`, коммитит, тегает и отправляет тег. Артефакты этот скрипт **не** собирает и **не** загружает.
+2. **goreleaser** (CI, `.github/workflows/release.yml`, конфиг в `.goreleaser.yaml`) — запускается по push тега, собирает 5 кросс-компилированных бинарников (linux/darwin × amd64/arm64, windows/amd64), сжимает UPX не-darwin бинарники, генерирует sha256 контрольные суммы и архив с исходниками, создаёт GitHub Release со всеми артефактами.
 
 ```bash
 scripts/release.sh patch      # 1.1.1 -> 1.1.2
 scripts/release.sh minor      # 1.1.1 -> 1.2.0
 scripts/release.sh major      # 1.1.1 -> 2.0.0
-scripts/release.sh --no-upload  # бамп локально без отправки релиза
+scripts/release.sh --no-upload  # бамп + тег локально без отправки (dry-run)
 ```
 
 Скрипт гейтится на `scripts/ci.sh` (те же 7 шагов, что `make ci`) — красный CI блокирует релиз. `CHANGELOG.md` следует формату [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); каждый релиз переводит секцию `## [Unreleased]` в датированную `## [x.y.z] — YYYY-MM-DD`.
+
+В `.goreleaser.yaml` в корне репозитория также есть закомментированные секции публикаторов для Homebrew (`brews:`), AUR (`aurs:`) и подписи cosign (`signs:`). Они активируются, когда появится owner-only инфраструктура — репозиторий `korrnals/homebrew-tap` (#26), аккаунт AUR (#27) и настройка cosign (#29) соответственно. Достаточно раскомментировать секцию и добавить соответствующий CI-секрет.
 
 ## Архитектура
 

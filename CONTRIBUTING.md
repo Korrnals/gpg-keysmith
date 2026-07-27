@@ -186,16 +186,22 @@ and are for the maintainer's local verification, not CI.
 
 Only the **maintainer** cuts releases. Contributors do not need to do this.
 
-The release process lives in `scripts/release.sh`. It bumps `VERSION`
-(the single source of truth), updates `CHANGELOG.md`, builds UPX-compressed
-artifacts, commits, tags, pushes, and creates a GitHub Release with the
-artifacts attached:
+The release process is split into two parts:
+
+1. **`scripts/release.sh`** (maintainer-local, gitignored) — bumps `VERSION`
+   (the single source of truth), updates `CHANGELOG.md`, commits, tags, and
+   pushes the tag. It does **not** build or upload artifacts.
+2. **goreleaser** (CI, `.github/workflows/release.yml`, configured by
+   `.goreleaser.yaml`) — triggered by the tag push, builds the 5
+   cross-compiled binaries (linux/darwin × amd64/arm64, windows/amd64),
+   UPX-compresses the non-darwin binaries, generates sha256 checksums and a
+   source archive, and creates the GitHub Release with all assets attached.
 
 ```bash
 scripts/release.sh patch      # 1.1.1 -> 1.1.2
 scripts/release.sh minor      # 1.1.1 -> 1.2.0
 scripts/release.sh major      # 1.1.1 -> 2.0.0
-scripts/release.sh --no-upload  # bump locally without pushing the release
+scripts/release.sh --no-upload  # bump + tag locally without pushing (dry-run)
 ```
 
 The script gates on `scripts/ci.sh` (the same 7 steps as `make ci`) — a red
@@ -203,6 +209,13 @@ CI blocks the release. `CHANGELOG.md` follows the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format; each release
 promotes the `## [Unreleased]` section to a dated `## [x.y.z] — YYYY-MM-DD`
 section.
+
+The `.goreleaser.yaml` at the repo root also carries commented-out publisher
+sections for Homebrew (`brews:`), AUR (`aurs:`), and cosign signing
+(`signs:`). These activate when the owner-only infra exists — the
+`korrnals/homebrew-tap` repo (#26), an AUR account (#27), and cosign setup
+(#29) respectively. Uncommenting the section plus adding the matching CI
+secret is all that's needed.
 
 ## Architecture
 
