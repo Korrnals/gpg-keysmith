@@ -16,6 +16,7 @@ on:
 permissions:
   contents: write   # create GitHub Release + upload assets
   packages: write   # reserved for future Docker publisher
+  id-token: write   # required for cosign keyless (GitHub OIDC) signing — issue #29
 
 jobs:
   release:
@@ -35,6 +36,12 @@ jobs:
 
       - name: Install UPX
         run: sudo apt-get update && sudo apt-get install -y upx-ucl
+
+      # Cosign (Sigstore) — required by goreleaser `signs:` config for
+      # keyless binary signing via GitHub OIDC. Must run BEFORE goreleaser.
+      # Closes #29.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
 
       - name: Run goreleaser
         uses: goreleaser/goreleaser-action@v6

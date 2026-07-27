@@ -93,6 +93,22 @@ make build     # produces ./bin/keysmith (UPX-compressed if upx is available)
    sudo mv keysmith /usr/local/bin/
    ```
 
+### Verifying a release binary's signature
+
+Release binaries are signed with [cosign](https://github.com/sigstore/cosign) (Sigstore) keyless signing, attested via GitHub OIDC. Each release publishes, alongside every binary and `checksums-sha256.txt`, a `.sig` signature file and a `.pem` certificate.
+
+To verify a downloaded binary (requires [`cosign`](https://github.com/sigstore/cosign#installation)):
+
+```bash
+cosign verify-blob keysmith-linux-amd64 \
+  --certificate keysmith-linux-amd64.pem \
+  --signature keysmith-linux-amd64.sig \
+  --certificate-identity-regexp 'https://github.com/Korrnals/gpg-keysmith/.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+```
+
+A successful verification prints `Verified OK` and confirms the binary was signed by the `gpg-keysmith` release workflow's GitHub OIDC identity. This complements the SHA-256 checksum check — together they close the TOFU (trust-on-first-use) gap where a downloader previously had to trust `checksums-sha256.txt` published on the same release page.
+
 ### Via `go install`
 
 ```bash

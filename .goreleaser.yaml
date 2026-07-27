@@ -161,20 +161,27 @@ release:
 #       # license
 #       install -Dm644 "./LICENSE" "${pkgdir}/usr/share/licenses/keysmith/LICENSE"
 
-# Cosign / Sigstore binary signing (issue #29).
-# Requires cosign installed in the release workflow + a cosign key or
-# keyless OIDC flow. Handled separately by Senior Security Engineer.
-# signs:
-#   - id: cosign
-#     cmd: cosign
-#     certificate: '${certificate}.pem'
-#     signature: '${signature}.sig'
-#     args:
-#       - sign-blob
-#       - '--output-certificate=${certificate}'
-#       - '--output-signature=${signature}'
-#       - '${artifact}'
-#     artifacts: all
+# Cosign / Sigstore keyless binary signing (closes #29).
+# Uses GitHub OIDC identity attestation — no COSIGN_PRIVATE_KEY secret.
+# Requires cosign installed in the release workflow (sigstore/cosign-installer)
+# and id-token: write permission on the release job.
+# For each artifact (5 cross-compiled binaries + checksums-sha256.txt),
+# goreleaser produces a .sig signature and a .pem certificate as
+# additional release assets, verifiable via `cosign verify-blob`.
+signs:
+  - id: cosign-keyless
+    cmd: cosign
+    signature: '${artifact}.sig'
+    certificate: '${artifact}.pem'
+    args:
+      - sign-blob
+      - '--yes'
+      - '--output-signature'
+      - '${signature}'
+      - '--output-certificate'
+      - '${certificate}'
+      - '${artifact}'
+    artifacts: all
 
 # SBOM (software bill of materials) generation.
 # goreleaser supports syft-based SBOMs natively. Enable when supply-chain
