@@ -89,6 +89,10 @@ keysmith wizard --reset
 - **State file never contains secrets.** The state file records only step names, key id, email, and repo. The `Passphrase`, `PrivateKey`, and `PubKeyArmor` fields on `WizardState` carry the `json:"-"` tag — they are held in memory between steps and discarded at the end of the run. The invariant is verified by `TestSaveStateOmitsSecrets`. See [Security](../security.md).
 - **Runtime dependencies.** Requires `gpg`, `git`, and `gh` (for the github step), plus the GitHub PAT env var.
 
+## After the wizard
+
+Once `keysmith wizard` finishes, your repo signs commits (`commit.gpgsign=true`). If you restart your shell, `gpg-agent`'s passphrase cache is gone and the next `git commit` may hang on a `pinentry` prompt. See [Caching your GPG passphrase](../../CONTRIBUTING.md#caching-your-gpg-passphrase-for-signed-commits) in `CONTRIBUTING.md` for a non-interactive `PRESET_PASSPHRASE` recipe.
+
 ## Per-step behaviour
 
 | Step | What it does | On failure |

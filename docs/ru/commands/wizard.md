@@ -89,6 +89,10 @@ keysmith wizard --reset
 - **В файле состояния нет секретов.** Файл состояния хранит только имена шагов, key id, email и репозиторий. Поля `Passphrase`, `PrivateKey` и `PubKeyArmor` структуры `WizardState` несут тег `json:"-"` — они хранятся в памяти между шагами и уничтожаются в конце запуска. Инвариант проверяется тестом `TestSaveStateOmitsSecrets`. См. [Безопасность](../security.md).
 - **Runtime-зависимости.** Требуется `gpg`, `git` и `gh` (для шага github), а также переменная окружения с GitHub PAT.
 
+## После мастера
+
+После `keysmith wizard` репозиторий подписывает коммиты (`commit.gpgsign=true`). При перезапуске shell кэш `gpg-agent` пропадает, и следующий `git commit` может зависнуть на `pinentry`. См. [Кэширование парольной фразы GPG](../../CONTRIBUTING.md#caching-your-gpg-passphrase-for-signed-commits) в `CONTRIBUTING.md` — рецепт с `PRESET_PASSPHRASE` без интерактивного ввода.
+
 ## Поведение по шагам
 
 | Шаг | Что делает | При сбое |

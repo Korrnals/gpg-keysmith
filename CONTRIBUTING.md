@@ -74,6 +74,48 @@ off `main`, merged via squash-merge pull requests.
 4. **Squash-merge.** Maintainable history — one commit per merged PR.
    No direct commits to `main`; every change lands through a reviewed PR.
 
+## Caching your GPG passphrase for signed commits
+
+After `keysmith wizard`, your repo has `commit.gpgsign=true` and
+`user.signingkey=<keyid>`. The next `git commit` needs the GPG
+passphrase. `gpg-agent` caches it, but **the cache does not survive a
+shell restart by default** — a new terminal may prompt via `pinentry`,
+which may not render in a headless box, CI, or the VS Code integrated
+terminal, and `git commit` hangs.
+
+To preset the passphrase non-interactively, use `gpg-connect-agent`
+with `PRESET_PASSPHRASE`:
+
+```bash
+# Find the keygrip of your key (the keygrip, not the key id):
+gpg --with-keygrip --list-secret-keys <your-keyid>
+# Look for the line starting with 'Keygrip =' under your key.
+
+# Cache the passphrase (requires gpg-agent running with
+# --allow-preset-passphrase):
+read -s -p "Passphrase: " pp; echo
+hex=$(printf '%s' "$pp" | xxd -p -c 1000 | tr -d '\n')
+gpg-connect-agent "PRESET_PASSPHRASE <keygrip> -1 $hex" /bye
+unset pp hex
+```
+
+Two gotchas:
+
+- **`PRESET_PASSPHRASE` takes a hex-encoded passphrase, not raw bytes.**
+  `xxd -p` converts the UTF-8 passphrase to hex; without it, the agent
+  rejects the passphrase silently and the next `git commit` still hangs.
+- **`gpg-agent` must run with `--allow-preset-passphrase`.** If
+  `gpg-connect-agent` returns `ERR 67108924 No --allow-preset-passphrase`,
+  restart the agent with the flag:
+
+  ```bash
+  gpgconf --kill gpg-agent
+  gpg-agent --daemon --allow-preset-passphrase
+  ```
+
+The cache survives for the lifetime of `gpg-agent` — until
+`gpgconf --kill gpg-agent` or a reboot.
+
 ## Local CI
 
 `make ci` runs a 7-step gate that mirrors what the maintainer checks before
