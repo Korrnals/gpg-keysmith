@@ -202,9 +202,18 @@ func LoadState(path string) (*WizardState, error) {
 // is written with 0600 perms because it contains the user's email
 // and key id (PII), even though it never contains secrets.
 //
+// The write is atomic: the state is first written to a sibling
+// `<StatePath>.tmp` file, fsynced, then os.Rename'd over the final
+// path. os.Rename is atomic on POSIX (same filesystem), so a crash
+// mid-write leaves either the previous state or the new state — never
+// a truncated/empty file. A stale .tmp left behind by a previous
+// crash is overwritten on the next run. On Windows os.Rename is not
+// strictly atomic but is the best available without extra deps.
+//
 // Security: the Passphrase, PrivateKey, and PubKeyArmor fields carry
 // `json:"-"` and are therefore NEVER written by this function. The
-// invariant is verified by TestSaveStateOmitsSecrets.
+// invariant is verified by TestSaveStateOmitsSecrets. Atomicity is
+// verified by TestSaveState_IsAtomic.
 func SaveState(state *WizardState) error {
 	if state.StatePath == "" {
 		return fmt.Errorf("wizard: save state: StatePath is empty")
@@ -217,8 +226,37 @@ func SaveState(state *WizardState) error {
 	if err != nil {
 		return fmt.Errorf("wizard: marshal state: %w", err)
 	}
-	if err := os.WriteFile(state.StatePath, data, 0o600); err != nil {
-		return fmt.Errorf("wizard: write state %s: %w", state.StatePath, err)
+	// Write to a sibling temp file, fsync, then rename over the
+	// final path. If any step after the open fails, remove the temp
+	// file so a stale .tmp does not linger (the next SaveState would
+	// overwrite it anyway, but cleaning up is tidier and keeps the
+	// failure mode debuggable).
+	tmp := state.StatePath + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("wizard: open state tmp %s: %w", tmp, err)
+	}
+	cleanup := func() { _ = os.Remove(tmp) }
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		cleanup()
+		return fmt.Errorf("wizard: write state tmp %s: %w", tmp, err)
+	}
+	// fsync before rename so the bytes are durable on disk before
+	// the final path points at them. Without fsync a crash after
+	// rename could expose zero-filled blocks on some filesystems.
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		cleanup()
+		return fmt.Errorf("wizard: fsync state tmp %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("wizard: close state tmp %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, state.StatePath); err != nil {
+		cleanup()
+		return fmt.Errorf("wizard: rename state %s: %w", state.StatePath, err)
 	}
 	return nil
 }
