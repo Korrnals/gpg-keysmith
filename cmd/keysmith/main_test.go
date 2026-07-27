@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Korrnals/gpg-keysmith/internal/config"
 	"github.com/Korrnals/gpg-keysmith/internal/git"
+	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
 	"github.com/Korrnals/gpg-keysmith/internal/keyserver"
 	"github.com/Korrnals/gpg-keysmith/internal/status"
@@ -1060,5 +1062,126 @@ func TestRunGithub_HappyPath(t *testing.T) {
 	}
 	if !strings.Contains(out, "https://github.com/owner/name/pull/1") {
 		t.Errorf("github output should contain the PR URL:\n%s", out)
+	}
+}
+
+// TestRunGithub_KeyAlreadyExists verifies runGithub consumes
+// *github.ErrKeyAlreadyExists (the 2026-07-22 dogfooded path): the
+// upload seam returns the typed error, runGithub does NOT propagate
+// it as a top-level error, and it still proceeds to the secrets +
+// PR steps. This is the B1 / B2 acceptance criterion — wiring the
+// typed error into the CLI command.
+func TestRunGithub_KeyAlreadyExists(t *testing.T) {
+	t.Cleanup(func() { resetGlobalFlags(t) })
+	t.Setenv("GITHUB_TOKEN", "ghp_mocktoken")
+
+	// Upload returns *github.ErrKeyAlreadyExists (the dogfooded
+	// 422 subkey-already-exists case). The run must consume this
+	// and continue.
+	savedUpload := uploadPublicKeyWithFingerprintFn
+	t.Cleanup(func() { uploadPublicKeyWithFingerprintFn = savedUpload })
+	uploadPublicKeyWithFingerprintFn = func(token, armoredPubKey, fingerprint string) (string, error) {
+		return "abcdef0123456789abcdef0123456789abcdef01", &github.ErrKeyAlreadyExists{
+			KeyID:       "72834",
+			Emails:      []string{"korrnals@example.com"},
+			Fingerprint: "abcdef0123456789abcdef0123456789abcdef01",
+		}
+	}
+
+	// The follow-up steps MUST still be called exactly once.
+	// Counters assert the call count instead of returning an error
+	// so a regression that silently drops the steps fails loudly.
+	secretsCalls := 0
+	savedSecrets := setGPGSecretsFn
+	t.Cleanup(func() { setGPGSecretsFn = savedSecrets })
+	setGPGSecretsFn = func(token, owner, repo, privateKey, passphrase string) error {
+		secretsCalls++
+		return nil
+	}
+
+	commitCalls := 0
+	savedCommit := commitPublicKeyFileFn
+	t.Cleanup(func() { commitPublicKeyFileFn = savedCommit })
+	commitPublicKeyFileFn = func(token, owner, repo, armoredPubKey string) (string, error) {
+		commitCalls++
+		return "https://github.com/owner/name/pull/1", nil
+	}
+
+	// exportPrivateKeyFn is invoked before the upload to obtain
+	// the in-memory private key for the secrets step. Stub.
+	savedPriv := exportPrivateKeyFn
+	t.Cleanup(func() { exportPrivateKeyFn = savedPriv })
+	exportPrivateKeyFn = func(keyID, passphrase string) (string, error) {
+		return mockArmorPriv, nil
+	}
+
+	// detectExistingKeysFn is invoked to look up the fingerprint
+	// for the upload call. The upload seam ignores the fingerprint
+	// (it returns the typed error regardless), so an empty result
+	// is fine here.
+	savedDetect := detectExistingKeysFn
+	t.Cleanup(func() { detectExistingKeysFn = savedDetect })
+	detectExistingKeysFn = mockDetectKeys
+
+	// surveyAskOneFn is invoked to prompt for the passphrase.
+	savedSurvey := surveyAskOneFn
+	t.Cleanup(func() { surveyAskOneFn = savedSurvey })
+	surveyAskOneFn = func(p survey.Prompt, response interface{}, opts ...survey.AskOpt) error {
+		switch resp := response.(type) {
+		case *string:
+			*resp = "ghpass"
+		default:
+			t.Errorf("unexpected survey response type %T for prompt %T", response, p)
+		}
+		return nil
+	}
+
+	pubPath := filepath.Join(t.TempDir(), "pub.asc")
+	if err := os.WriteFile(pubPath, []byte(mockArmorPub), 0o644); err != nil {
+		t.Fatalf("write pubkey file: %v", err)
+	}
+
+	out, _, err := runRoot(t, "github",
+		"--repo", "owner/name",
+		"--keyid", mockKeyIDShort,
+		"--pubkey-file", pubPath,
+	)
+	// (a) No error returned from runGithub. The typed error MUST
+	// be consumed — if it leaks, this fails the contract.
+	if err != nil {
+		var keyExists *github.ErrKeyAlreadyExists
+		if errors.As(err, &keyExists) {
+			t.Fatalf("runGithub must NOT surface *github.ErrKeyAlreadyExists to the caller: %v", err)
+		}
+		t.Fatalf("github returned unexpected error: %v", err)
+	}
+
+	// (b) setGPGSecretsFn called exactly once.
+	if secretsCalls != 1 {
+		t.Errorf("setGPGSecretsFn call count = %d, want 1 (the typed error must not skip the secrets step)", secretsCalls)
+	}
+
+	// (c) commitPublicKeyFileFn called exactly once.
+	if commitCalls != 1 {
+		t.Errorf("commitPublicKeyFileFn call count = %d, want 1 (the typed error must not skip the PR step)", commitCalls)
+	}
+
+	// The "already on GitHub" line MUST be printed so the user
+	// sees the discovery (this is the whole point of the typed
+	// error — silent success would confuse the operator).
+	if !strings.Contains(out, "already on GitHub") {
+		t.Errorf("github output should mention 'already on GitHub' on the typed-error path:\n%s", out)
+	}
+	if !strings.Contains(out, "72834") {
+		t.Errorf("github output should contain the existing key id 72834:\n%s", out)
+	}
+	if !strings.Contains(out, "korrnals@example.com") {
+		t.Errorf("github output should contain the existing key's email:\n%s", out)
+	}
+	if !strings.Contains(out, "Secrets set") {
+		t.Errorf("github output should mention 'Secrets set' after the typed-error recovery:\n%s", out)
+	}
+	if !strings.Contains(out, "PR opened") && !strings.Contains(out, "pull/1") {
+		t.Errorf("github output should show the PR URL after the typed-error recovery:\n%s", out)
 	}
 }

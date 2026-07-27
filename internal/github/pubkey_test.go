@@ -148,8 +148,11 @@ func TestUploadPublicKey_SuccessfulUpload(t *testing.T) {
 }
 
 // TestUploadPublicKeyWithFingerprint_ExistingKeySkipsUpload verifies
-// that when the caller passes a fingerprint matching an existing key,
-// no POST is made and the existing fingerprint is returned.
+// that when the caller passes a fingerprint matching an existing
+// key, no POST is made and the function returns the existing
+// fingerprint wrapped in *ErrKeyAlreadyExists. The wizard consumes
+// the typed error and treats the step as already-done — see
+// internal/wizard for the consumer side.
 func TestUploadPublicKeyWithFingerprint_ExistingKeySkipsUpload(t *testing.T) {
 	existing := []GpgKeyRef{
 		{ID: 1, KeyID: "K1", Fingerprint: "ABCDEF0123456789ABCDEF0123456789ABCDEF01"},
@@ -161,11 +164,15 @@ func TestUploadPublicKeyWithFingerprint_ExistingKeySkipsUpload(t *testing.T) {
 	}}
 	fp, err := UploadPublicKeyWithFingerprintAndClient("tok", sampleArmor,
 		"ABCDEF0123456789ABCDEF0123456789ABCDEF01", f)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	var keyExists *ErrKeyAlreadyExists
+	if !errors.As(err, &keyExists) {
+		t.Fatalf("error is not *ErrKeyAlreadyExists: %v", err)
 	}
 	if fp != "ABCDEF0123456789ABCDEF0123456789ABCDEF01" {
 		t.Errorf("fingerprint = %q, want existing", fp)
+	}
+	if keyExists.KeyID != "1" {
+		t.Errorf("KeyID = %q, want %q", keyExists.KeyID, "1")
 	}
 	// Only the GET should have been made — no POST.
 	for _, c := range f.calls {
@@ -189,11 +196,12 @@ func TestUploadPublicKeyWithFingerprint_NormalisesFingerprint(t *testing.T) {
 	// Pass uppercase with spaces — should match the lowercase existing.
 	fp, err := UploadPublicKeyWithFingerprintAndClient("tok", sampleArmor,
 		"AB CD EF 01 23 45 67 89 AB CD EF 01 23 45 67 89 AB CD EF 01", f)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	var keyExists *ErrKeyAlreadyExists
+	if !errors.As(err, &keyExists) {
+		t.Fatalf("error is not *ErrKeyAlreadyExists: %v", err)
 	}
 	if fp == "" {
-		t.Error("fingerprint should not be empty")
+		t.Error("fingerprint should not be empty even when error is set")
 	}
 }
 

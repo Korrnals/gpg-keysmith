@@ -7,6 +7,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1115,22 +1116,41 @@ func runGithub(cmd *cobra.Command, args []string) error {
 
 	// 8. Upload the public key to GitHub. If a key with the same
 	// fingerprint is already present, the upload is skipped and the
-	// existing fingerprint is returned.
+	// existing fingerprint is returned. If a key with the same
+	// subkey (under a different primary) is already present (the
+	// 2026-07-22 dogfooded case), the upload returns the typed
+	// *github.ErrKeyAlreadyExists — we treat that as success
+	// (the signing pipeline will work) and continue to the
+	// secrets + PR steps.
 	_, _ = fmt.Fprintln(out)
 	_, _ = fmt.Fprintln(out, "==> Uploading public key to GitHub...")
 	uploadedFP, err = uploadPublicKeyWithFingerprintFn(token, pubArmor, fingerprint)
 	if err != nil {
-		// Report what we have so far and stop — the user needs to
-		// fix the upload before secrets/PR can proceed (the PR
-		// commits the same key; secrets need the private key which
-		// we already have, but a half-state is worse than a clean
-		// stop with a diagnostic).
-		printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
-			didSetSecrets, didOpenPR, prURL)
-		return fmt.Errorf("github: upload public key: %w", err)
+		var keyExists *github.ErrKeyAlreadyExists
+		switch {
+		case errors.As(err, &keyExists):
+			// Subkey already on the account. Mark this step
+			// done and continue — the secrets + PR steps are
+			// idempotent on a re-run, and skipping them on a
+			// fresh run would leave a half-state.
+			didUploadPubkey = true
+			uploadedFP = keyExists.Fingerprint
+			_, _ = fmt.Fprintf(out, "    %s\n", formatKeyRef(keyExists))
+		default:
+			// Report what we have so far and stop — the
+			// user needs to fix the upload before
+			// secrets/PR can proceed (the PR commits the
+			// same key; secrets need the private key which
+			// we already have, but a half-state is worse
+			// than a clean stop with a diagnostic).
+			printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
+				didSetSecrets, didOpenPR, prURL)
+			return fmt.Errorf("github: upload public key: %w", err)
+		}
+	} else {
+		didUploadPubkey = true
+		_, _ = fmt.Fprintf(out, "    Public key uploaded (fingerprint: %s)\n", uploadedFP)
 	}
-	didUploadPubkey = true
-	_, _ = fmt.Fprintf(out, "    Public key uploaded (fingerprint: %s)\n", uploadedFP)
 
 	// 9. Set GPG_PRIVATE_KEY and GPG_PASSPHRASE repo secrets via gh CLI.
 	_, _ = fmt.Fprintln(out, "==> Setting repo secrets GPG_PRIVATE_KEY and GPG_PASSPHRASE...")
@@ -1157,6 +1177,29 @@ func runGithub(cmd *cobra.Command, args []string) error {
 	printGithubSummary(out, owner, repo, didUploadPubkey, uploadedFP,
 		didSetSecrets, didOpenPR, prURL)
 	return nil
+}
+
+// formatKeyRef renders a one-line "Public key subkey <fp> is already
+// on GitHub as key <id> (<emails>)." message for the
+// *github.ErrKeyAlreadyExists case. The empty key / empty emails
+// cases are guarded so the message never contains a stray "key  ()"
+// or trailing comma. Used by runGithub when the upload returns the
+// typed error (the 2026-07-22 dogfooded path).
+func formatKeyRef(keyExists *github.ErrKeyAlreadyExists) string {
+	fp := keyExists.Fingerprint
+	switch {
+	case keyExists.KeyID == "" && len(keyExists.Emails) == 0:
+		return fmt.Sprintf("Public key subkey %s is already on GitHub. Skipping upload.", fp)
+	case keyExists.KeyID == "":
+		return fmt.Sprintf("Public key subkey %s is already on GitHub (%s). Skipping upload.",
+			fp, strings.Join(keyExists.Emails, ", "))
+	case len(keyExists.Emails) == 0:
+		return fmt.Sprintf("Public key subkey %s is already on GitHub as key %s. Skipping upload.",
+			fp, keyExists.KeyID)
+	default:
+		return fmt.Sprintf("Public key subkey %s is already on GitHub as key %s (%s). Skipping upload.",
+			fp, keyExists.KeyID, strings.Join(keyExists.Emails, ", "))
+	}
 }
 
 // printGithubSummary prints a structured summary of which steps
