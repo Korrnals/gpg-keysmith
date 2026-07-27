@@ -1,6 +1,9 @@
 package gpg
 
 import (
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 )
@@ -255,5 +258,134 @@ func TestParseColonOutput_TakesOnlyFirstFingerprint(t *testing.T) {
 	if keys[0].Fingerprint != "PRIMARYFINGERPRINT0PRIMARYFINGERPRINT0PRI" {
 		t.Errorf("Fingerprint = %q, want primary fpr (not overwritten by subkey fpr)",
 			keys[0].Fingerprint)
+	}
+}
+
+// --- DetectExistingKeys / DetectKeyForEmail tests ----------------------
+
+// setupIsolatedGNUPGHOME creates a fresh GNUPGHOME in a temp dir and
+// generates a single throwaway RSA test key with a "Test User <email>"
+// user id and no passphrase. The uid uses angle brackets so
+// DetectKeyForEmail's "<email>" needle matches it. The key is fast to
+// generate (~1s on modern hardware) and never touches the user's real
+// keyring because GNUPGHOME is overridden via t.Setenv (auto-restored
+// on test completion).
+//
+// Tests using this helper skip when gpg is not on PATH (issue #30
+// tracking link, not a flake guard — per lint-and-validate policy).
+func setupIsolatedGNUPGHOME(t *testing.T, email string) {
+	t.Helper()
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("issue #30: gpg binary not on PATH; detect tests need gpg against an isolated keyring")
+	}
+	home := t.TempDir()
+	// gpg refuses a GNUPGHOME with loose perms.
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatalf("chmod GNUPGHOME: %v", err)
+	}
+	t.Setenv("GNUPGHOME", home)
+	// Use a full "Name <email>" uid so the angle-bracket needle in
+	// DetectKeyForEmail matches. The bare-email "default" profile
+	// produces a uid without angle brackets, which the needle misses.
+	uid := "Test User <" + email + ">"
+	gen := exec.Command("gpg", "--batch", "--yes", "--pinentry-mode", "loopback",
+		"--passphrase", "", "--quick-generate-key", uid, "rsa3072", "default", "0")
+	if out, err := gen.CombinedOutput(); err != nil {
+		t.Fatalf("gpg --quick-generate-key %s: %v\n%s", uid, err, out)
+	}
+}
+
+// TestDetectExistingKeys_EmptyKeyring verifies that a freshly-created
+// GNUPGHOME with no keys returns an empty (non-nil) slice and no
+// error. This exercises the gpg shell-out and the parseColonOutput
+// path on real (empty) gpg output.
+func TestDetectExistingKeys_EmptyKeyring(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("issue #30: gpg binary not on PATH; DetectExistingKeys needs gpg against an isolated keyring")
+	}
+	home := t.TempDir()
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatalf("chmod GNUPGHOME: %v", err)
+	}
+	t.Setenv("GNUPGHOME", home)
+
+	keys, err := DetectExistingKeys()
+	if err != nil {
+		t.Fatalf("DetectExistingKeys on empty keyring: unexpected error: %v", err)
+	}
+	if len(keys) != 0 {
+		t.Errorf("empty keyring returned %d keys, want 0 (got %+v)", len(keys), keys)
+	}
+}
+
+// TestDetectExistingKeys_FindsGeneratedKey verifies that after
+// generating a key in an isolated GNUPGHOME, DetectExistingKeys
+// returns exactly one key with the expected email in the user id.
+func TestDetectExistingKeys_FindsGeneratedKey(t *testing.T) {
+	email := "detect-test@example.com"
+	setupIsolatedGNUPGHOME(t, email)
+
+	keys, err := DetectExistingKeys()
+	if err != nil {
+		t.Fatalf("DetectExistingKeys: unexpected error: %v", err)
+	}
+	if len(keys) != 1 {
+		t.Fatalf("got %d keys, want 1 (got %+v)", len(keys), keys)
+	}
+	if keys[0].KeyID == "" {
+		t.Error("KeyID is empty; gpg should always populate it for a sec record")
+	}
+	if keys[0].Fingerprint == "" {
+		t.Error("Fingerprint is empty; gpg should always populate it for a sec record")
+	}
+	if !strings.Contains(keys[0].UserId, email) {
+		t.Errorf("UserId = %q, want it to contain %q", keys[0].UserId, email)
+	}
+	if keys[0].Type != "sec" {
+		t.Errorf("Type = %q, want sec", keys[0].Type)
+	}
+	if keys[0].Created.IsZero() {
+		t.Error("Created is zero; a freshly-generated key must have a creation time")
+	}
+}
+
+// TestDetectKeyForEmail_FindsMatch verifies DetectKeyForEmail returns
+// a non-nil *GpgKey whose user id contains the target email when the
+// key exists in the isolated keyring.
+func TestDetectKeyForEmail_FindsMatch(t *testing.T) {
+	email := "match-test@example.com"
+	setupIsolatedGNUPGHOME(t, email)
+
+	key, err := DetectKeyForEmail(email)
+	if err != nil {
+		t.Fatalf("DetectKeyForEmail: unexpected error: %v", err)
+	}
+	// DetectKeyForEmail returns (nil, nil) when no key matches. A nil
+	// key here means generation failed silently. Dereference inside the
+	// non-nil branch so staticcheck can prove the pointer is non-nil
+	// (avoids SA5011 false positive on the t.Fatal-then-deref pattern).
+	if key != nil {
+		uid := key.UserId
+		if !strings.Contains(uid, "<"+email+">") {
+			t.Errorf("UserId = %q, want it to contain <%s>", uid, email)
+		}
+	} else {
+		t.Fatal("DetectKeyForEmail returned nil for a key that was just generated")
+	}
+}
+
+// TestDetectKeyForEmail_NoMatchReturnsNilError verifies that an email
+// not present in the keyring returns (nil, nil) — callers distinguish
+// this from an error, so the nil-error contract must hold.
+func TestDetectKeyForEmail_NoMatchReturnsNilError(t *testing.T) {
+	email := "present@example.com"
+	setupIsolatedGNUPGHOME(t, email)
+
+	key, err := DetectKeyForEmail("absent@example.com")
+	if err != nil {
+		t.Fatalf("DetectKeyForEmail on absent email: unexpected error: %v", err)
+	}
+	if key != nil {
+		t.Errorf("DetectKeyForEmail on absent email returned %+v, want nil", key)
 	}
 }

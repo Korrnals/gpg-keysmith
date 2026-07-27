@@ -1,6 +1,8 @@
 package gpg
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -171,5 +173,192 @@ func TestExportPrivateKey_ArgsNeverContainPassphraseValue(t *testing.T) {
 				t.Errorf("passphrase value %q leaked into args %v", p, args)
 			}
 		}
+	}
+}
+
+// TestBuildExportPublicKeyArgs_TableDriven verifies the public-key
+// export arg vector matches the exact order and tokens the production
+// code passes to exec.Command. buildExportPublicKeyArgs is a pure
+// function extracted specifically so tests can assert the args without
+// invoking gpg.
+func TestBuildExportPublicKeyArgs_TableDriven(t *testing.T) {
+	cases := []struct {
+		name  string
+		keyID string
+		want  []string
+	}{
+		{
+			name:  "long key id",
+			keyID: "F49BE957CD553B1C",
+			want:  []string{"--armor", "--export", "F49BE957CD553B1C"},
+		},
+		{
+			name:  "full fingerprint",
+			keyID: "F49BE957CD553B1CF49BE957CD553B1CF49BE957",
+			want:  []string{"--armor", "--export", "F49BE957CD553B1CF49BE957CD553B1CF49BE957"},
+		},
+		{
+			name:  "short key id",
+			keyID: "ABCD",
+			want:  []string{"--armor", "--export", "ABCD"},
+		},
+		{
+			name:  "with 0x prefix",
+			keyID: "0xABCD",
+			want:  []string{"--armor", "--export", "0xABCD"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildExportPublicKeyArgs(tc.keyID)
+			if len(got) != len(tc.want) {
+				t.Fatalf("len(args) = %d, want %d (got %v)", len(got), len(tc.want), got)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("args[%d] = %q, want %q (full: %v)", i, got[i], tc.want[i], got)
+				}
+			}
+			// The arg vector must never contain the secret-key export
+			// flag — this is a public key export, not a secret one.
+			for _, a := range got {
+				if a == "--export-secret-keys" {
+					t.Errorf("public export args must NOT contain --export-secret-keys; got %v", got)
+				}
+			}
+		})
+	}
+}
+
+// TestExtractFingerprintFromArmorFile_EmptyPathReturnsError verifies
+// that an empty path is rejected before gpg is invoked. This is the
+// pre-flight guard that prevents a confusing gpg diagnostic when the
+// caller (the publish subcommand) passes an unset --pubkey-file.
+func TestExtractFingerprintFromArmorFile_EmptyPathReturnsError(t *testing.T) {
+	_, err := ExtractFingerprintFromArmorFile("")
+	if err == nil {
+		t.Fatal("ExtractFingerprintFromArmorFile(\"\") must return an error before invoking gpg")
+	}
+	if !strings.Contains(err.Error(), "path") {
+		t.Errorf("error should mention path, got: %v", err)
+	}
+}
+
+// TestExtractFingerprintFromArmorFile_NoFingerprintInOutput verifies
+// that when gpg's colon output contains no fpr record, the function
+// returns an error — either the gpg failure itself (gpg exits non-zero
+// on a non-armor file) or the "no fingerprint found" message (gpg exits
+// 0 but emits no fpr line). Both branches are acceptable failure modes
+// for a malformed pubkey file; the contract is "returns an error, not a
+// bogus fingerprint".
+//
+// Skipped when the gpg binary is absent; the skip carries a tracking
+// issue link per lint-and-validate.instructions.md. Not a flake guard.
+func TestExtractFingerprintFromArmorFile_NoFingerprintInOutput(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("issue #30: gpg binary not on PATH; ExtractFingerprintFromArmorFile needs gpg to exercise the no-fpr branch")
+	}
+	dir := t.TempDir()
+	empty := dir + "/empty.asc"
+	if err := os.WriteFile(empty, []byte("not a pgp armor\n"), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	got, err := ExtractFingerprintFromArmorFile(empty)
+	if err == nil {
+		t.Fatalf("ExtractFingerprintFromArmorFile on a non-armor file returned %q, want an error", got)
+	}
+	// The error must be non-empty and must NOT contain a fabricated
+	// fingerprint. Either the gpg-failure branch or the no-fpr branch
+	// is acceptable; we assert only the error contract.
+	if got != "" {
+		t.Errorf("on error, return value must be empty, got %q", got)
+	}
+}
+
+// TestExtractFingerprintFromArmorFile_ExtractsFingerprint verifies the
+// happy path: gpg --show-keys on a real armored public key returns the
+// primary key fingerprint via the first fpr record. We generate a
+// throwaway RSA test key in an isolated GNUPGHOME so the test never
+// touches the user's real keyring and is deterministic across runs.
+//
+// Skipped when gpg is absent (issue #30 tracking link, not a flake guard).
+func TestExtractFingerprintFromArmorFile_ExtractsFingerprint(t *testing.T) {
+	if _, err := exec.LookPath("gpg"); err != nil {
+		t.Skip("issue #30: gpg binary not on PATH; ExtractFingerprintFromArmorFile needs gpg to extract a real fingerprint")
+	}
+
+	home := t.TempDir()
+	// gpg refuses to operate on a GNUPGHOME with loose perms.
+	if err := os.Chmod(home, 0o700); err != nil {
+		t.Fatalf("chmod GNUPGHOME: %v", err)
+	}
+	t.Setenv("GNUPGHOME", home)
+
+	// Generate a fast, throwaway RSA test key with a full "Name <email>"
+	// uid (the angle-bracket form is what DetectKeyForEmail looks for).
+	email := "keysmith-test@example.com"
+	uid := "Test User <" + email + ">"
+	gen := exec.Command("gpg", "--batch", "--yes", "--pinentry-mode", "loopback",
+		"--passphrase", "", "--quick-generate-key", uid, "rsa3072", "default", "0")
+	if out, err := gen.CombinedOutput(); err != nil {
+		t.Fatalf("gpg --quick-generate-key: %v\n%s", err, out)
+	}
+
+	// Look up the generated key by email to get its long key id, then
+	// export the public key armor. ExportPublicKey validates the key id
+	// is hex, so we must pass the key id (not the email).
+	key, err := DetectKeyForEmail(email)
+	if err != nil {
+		t.Fatalf("DetectKeyForEmail: %v", err)
+	}
+	// DetectKeyForEmail returns (nil, nil) on no match; a nil key here
+	// means generation failed silently. Put the dereferences in the
+	// non-nil branch so staticcheck can prove the pointer is non-nil
+	// (avoids SA5011 false positive on the t.Fatal-then-deref pattern).
+	if key == nil {
+		t.Fatalf("DetectKeyForEmail(%q) returned nil; key generation may have failed", email)
+	}
+	extractAndCheckFingerprint(t, key, home)
+}
+
+// extractAndCheckFingerprint exports the key's public armor, extracts
+// the fingerprint from the armor file, and asserts it matches the
+// keyring fingerprint. Extracted so the dereferences of `key` live in
+// a function that receives a non-nil *GpgKey — staticcheck can then
+// prove the pointer is non-nil (the nil guard is in the caller).
+func extractAndCheckFingerprint(t *testing.T, key *GpgKey, home string) {
+	t.Helper()
+	keyID := key.KeyID
+	pubArmor, err := ExportPublicKey(keyID)
+	if err != nil {
+		t.Fatalf("ExportPublicKey(%q): %v", keyID, err)
+	}
+	pubFile := home + "/pub.asc"
+	if err := os.WriteFile(pubFile, []byte(pubArmor), 0o600); err != nil {
+		t.Fatalf("write pub armor: %v", err)
+	}
+
+	got, err := ExtractFingerprintFromArmorFile(pubFile)
+	if err != nil {
+		t.Fatalf("ExtractFingerprintFromArmorFile: %v", err)
+	}
+	if len(got) != 40 {
+		t.Errorf("fingerprint length = %d, want 40 (got %q)", len(got), got)
+	}
+	for _, r := range got {
+		isHex := (r >= '0' && r <= '9') || (r >= 'A' && r <= 'F')
+		if !isHex {
+			t.Errorf("fingerprint must be uppercase hex, got %q", got)
+			break
+		}
+	}
+	// The fingerprint extracted from the armor file must match the
+	// fingerprint gpg reported for the key in the keyring — this is the
+	// invariant the publish subcommand relies on to detect a mismatched
+	// --keyid vs --pubkey-file pair.
+	wantFpr := key.Fingerprint
+	if got != wantFpr {
+		t.Errorf("extracted fingerprint %q != keyring fingerprint %q", got, wantFpr)
 	}
 }
