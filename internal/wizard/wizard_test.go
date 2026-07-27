@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Korrnals/gpg-keysmith/internal/git"
+	"github.com/Korrnals/gpg-keysmith/internal/github"
 	"github.com/Korrnals/gpg-keysmith/internal/gpg"
 	"github.com/Korrnals/gpg-keysmith/internal/keyserver"
 )
@@ -885,11 +886,13 @@ func saveStepFns() func() {
 		uploadPublicKey     func(string, string, string) (string, error)
 		setGPGSecrets       func(string, string, string, string, string) error
 		commitPublicKeyFile func(string, string, string, string) (string, error)
+		listUserGpgKeys     func(string) ([]github.GpgKeyRef, error)
 		publishPubKey       func(keyserver.PublishOptions) ([]keyserver.PublishResult, error)
 	}{
 		gpgDetectExistingKeysFn, gpgGenerateKeyFn, gpgExportPublicKeyFn,
 		gpgExportPrivateKeyFn, gitApplyGitConfigFn, githubUploadPublicKeyFn,
-		githubSetGPGSecretsFn, githubCommitPublicKeyFileFn, keyserverPublishPubKeyFn,
+		githubSetGPGSecretsFn, githubCommitPublicKeyFileFn, githubListUserGpgKeysFn,
+		keyserverPublishPubKeyFn,
 	}
 	return func() {
 		gpgDetectExistingKeysFn = saved.detectExistingKeys
@@ -900,6 +903,7 @@ func saveStepFns() func() {
 		githubUploadPublicKeyFn = saved.uploadPublicKey
 		githubSetGPGSecretsFn = saved.setGPGSecrets
 		githubCommitPublicKeyFileFn = saved.commitPublicKeyFile
+		githubListUserGpgKeysFn = saved.listUserGpgKeys
 		keyserverPublishPubKeyFn = saved.publishPubKey
 	}
 }
