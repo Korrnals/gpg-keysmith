@@ -93,6 +93,22 @@ make build     # собирает ./bin/keysmith (сжимается UPX, есл
    sudo mv keysmith /usr/local/bin/
    ```
 
+### Проверка подписи релизного бинарника
+
+Релизные бинарники подписываются через [cosign](https://github.com/sigstore/cosign) (проект Sigstore) методом keyless-подписи — без долгоживущего ключа, с удостоверением личности через GitHub OIDC (OpenID Connect). Рядом с каждым бинарником и файлом `checksums-sha256.txt` релиз публикует файл подписи `.sig` и сертификат `.pem`.
+
+Для проверки скачанного бинарника (нужен установленный [`cosign`](https://github.com/sigstore/cosign#installation)):
+
+```bash
+cosign verify-blob keysmith-linux-amd64 \
+  --certificate keysmith-linux-amd64.pem \
+  --signature keysmith-linux-amd64.sig \
+  --certificate-identity-regexp 'https://github.com/Korrnals/gpg-keysmith/.*' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+```
+
+Успешная проверка выводит `Verified OK` и подтверждает, что бинарник подписан workflow релиза `gpg-keysmith` через GitHub OIDC. Это дополняет проверку SHA-256 — вместе они закрывают модель TOFU (trust-on-first-use, доверие при первом использовании), где ранее пользователю приходилось верить файлу `checksums-sha256.txt`, опубликованному на той же странице релиза.
+
 ### Через `go install`
 
 ```bash
