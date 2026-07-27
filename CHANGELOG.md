@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.4.0] — 2026-07-27
 
+### Added
+- `CONTRIBUTING.md`: documented the `PRESET_PASSPHRASE` recipe for signed commits after the wizard (#31, closes #23)
+- `docs/{en,ru}/commands/wizard.md`: new "After the wizard" section explaining post-wizard signed commits (#34, closes #24)
+- `docs/{en,ru}/security.md`: note on `state.json` concurrency (single wizard instance at a time) (#34, closes #25)
+- `internal/gpg`: test coverage raised from 47.8% to 80.9% (#35, closes #30)
+
+### Changed
+- `internal/wizard`: `SaveState` now writes to a temp file then renames atomically, preventing partial `state.json` on crash (#32, closes #21)
+
+### Fixed
+- `internal/wizard`: `GithubKeyID` is now re-validated against the current GitHub token on wizard re-run, catching stale or revoked keys (#33, closes #22)
+
 ## [1.3.2] — 2026-07-27
 
 ## [1.3.1] — 2026-07-22
