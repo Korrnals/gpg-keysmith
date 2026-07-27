@@ -7,20 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.0] — 2026-07-27
+
 ### Added
-- `.goreleaser.yaml`: goreleaser config with 5 cross-compilation targets (linux/darwin × amd64/arm64, windows/amd64), UPX compression on non-darwin binaries, sha256 checksums, and source archive — replicating the artifact set from the old `scripts/build-artifacts.sh` (#28)
-- `.github/workflows/release.yml`: GitHub Actions workflow that runs `goreleaser release` on tag push (`v*`), replacing the manual `scripts/release.sh` build + `gh release create` flow (#28)
-- `.goreleaser.yaml`: commented-out publisher sections for Homebrew (`brews:`), AUR (`aurs:`), and cosign signing (`signs:`) — activate when owner-only infra exists (#26, #27, #29)
+- Release pipeline migrated to goreleaser (`.goreleaser.yaml` + `.github/workflows/release.yml`); `scripts/release.sh` reduced to a thin wrapper (bump VERSION + commit + tag + push) — goreleaser in CI builds the 5 cross-compiled binaries + checksums + tarball and creates the GitHub Release on tag push (#37, closes #28)
+- Release binaries now signed with cosign (Sigstore keyless via GitHub OIDC); each artifact gets a `.sig` signature and `.pem` certificate published alongside it, verifiable via `cosign verify-blob` (#38, closes #29)
+- `README.md` and `docs/{en,ru}/installation.md`: documented the cosign binary verification flow (#38)
 
 ### Changed
-- `scripts/release.sh`: reduced to a thin wrapper — bumps `VERSION`, commits, tags, and pushes; no longer builds or uploads artifacts (goreleaser in CI does that on tag push) (#28)
-- `CONTRIBUTING.md`, `docs/ru/CONTRIBUTING.md`: release process section rewritten to describe the two-part flow (local `release.sh` + CI goreleaser) (#28)
+- `CONTRIBUTING.md` (en/ru): release process section rewritten for the two-part flow (local `scripts/release.sh` + CI goreleaser) (#37)
+- `docs/{en,ru}/installation.md`: fixed checksum filename (`checksums.txt` → `checksums-sha256.txt`) (#37)
 
-### Fixed
-- `docs/{en,ru}/installation.md`: corrected checksum filename from `checksums.txt` to `checksums-sha256.txt` (matches the actual artifact name produced by the release pipeline) (#28)
-
-### Removed
-- `scripts/build-artifacts.sh`: superseded by goreleaser (the script was gitignored/local-only; the goreleaser config is the new source of truth) (#28)
+### Closed (not planned)
+- #26 Homebrew formula — closed as not_planned (owner decision: package-manager distribution out of scope; per-system binaries + build-from-source is sufficient)
+- #27 Arch AUR package — closed as not_planned (same reason)
 
 ## [1.4.0] — 2026-07-27
 
