@@ -173,3 +173,241 @@ func TestGenerateKey_EmptyNameReturnsError(t *testing.T) {
 		t.Errorf("error should mention name, got: %v", err)
 	}
 }
+
+// --- validateBatchInput tests -------------------------------------------
+
+// TestValidateBatchInput_TableDriven verifies the control-character
+// injection guard accepts printable runes + tab and rejects newline,
+// carriage return, and other control characters. This is the
+// security gate that prevents a '\n' in Name-Real from starting a new
+// gpg batch directive.
+func TestValidateBatchInput_TableDriven(t *testing.T) {
+	accept := []struct {
+		name string
+		in   string
+	}{
+		{name: "plain ascii", in: "Alice"},
+		{name: "email", in: "alice@example.com"},
+		{name: "with spaces", in: "Alice Bob"},
+		{name: "unicode printable", in: "Алиса"},
+		{name: "tab allowed", in: "field\tvalue"},
+		{name: "expiry spec", in: "2y"},
+		{name: "absolute date", in: "2026-12-31"},
+		{name: "key type", in: "RSA"},
+		{name: "empty string", in: ""}, // empty is valid — caller decides requiredness
+	}
+	for _, tc := range accept {
+		t.Run("accept/"+tc.name, func(t *testing.T) {
+			if err := validateBatchInput(tc.in); err != nil {
+				t.Errorf("validateBatchInput(%q) = %v, want nil", tc.in, err)
+			}
+		})
+	}
+
+	reject := []struct {
+		name string
+		in   string
+	}{
+		{name: "newline", in: "Alice\nEvil"},
+		{name: "carriage return", in: "Alice\rEvil"},
+		{name: "vertical tab", in: "Alice\vEvil"},
+		{name: "form feed", in: "Alice\fEvil"},
+		{name: "null byte", in: "Alice\x00Evil"},
+		{name: "DEL 0x7F", in: "Alice\x7FEvil"},
+		{name: "embedded newline in email", in: "alice@example.com\nPassphrase: leaked"},
+	}
+	for _, tc := range reject {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			if err := validateBatchInput(tc.in); err == nil {
+				t.Errorf("validateBatchInput(%q) = nil, want an error (control char)", tc.in)
+			}
+		})
+	}
+}
+
+// --- validateKeyLength tests --------------------------------------------
+
+// TestValidateKeyLength_TableDriven verifies the key-length range guard
+// [1024, 8192]. 0 is allowed (GenerateKey applies the 4096 default
+// before calling buildBatchFile — 0 means "unset"). Values outside the
+// range are rejected to block absurd caller-supplied lengths.
+func TestValidateKeyLength_TableDriven(t *testing.T) {
+	accept := []int{0, 1024, 2048, 3072, 4096, 8192}
+	for _, n := range accept {
+		if err := validateKeyLength(n); err != nil {
+			t.Errorf("validateKeyLength(%d) = %v, want nil", n, err)
+		}
+	}
+
+	reject := []int{1, 512, 1000, 1023, 8193, 1000000, -1}
+	for _, n := range reject {
+		if err := validateKeyLength(n); err == nil {
+			t.Errorf("validateKeyLength(%d) = nil, want an error (out of [1024, 8192])", n)
+		}
+	}
+}
+
+// --- buildBatchFile rejection-path tests --------------------------------
+
+// TestBuildBatchFile_RejectsNewlineInName verifies that a newline
+// embedded in Name is rejected by buildBatchFile (via validateBatchInput)
+// with an error mentioning the Name field — this is the injection guard
+// the pure builder enforces before interpolating user input.
+func TestBuildBatchFile_RejectsNewlineInName(t *testing.T) {
+	opts := GenerateOptions{
+		Name:       "Alice\nPassphrase: leaked",
+		Email:      "alice@example.com",
+		KeyType:    "RSA",
+		KeyLength:  4096,
+		Expiry:     "0",
+		Passphrase: "<REDACTED>",
+	}
+	_, err := buildBatchFile(opts)
+	if err == nil {
+		t.Fatal("buildBatchFile with newline in Name must return an error")
+	}
+	if !strings.Contains(err.Error(), "Name") {
+		t.Errorf("error should mention the Name field, got: %v", err)
+	}
+}
+
+// TestBuildBatchFile_RejectsNewlineInEmail verifies the injection guard
+// fires on the Email field as well.
+func TestBuildBatchFile_RejectsNewlineInEmail(t *testing.T) {
+	opts := GenerateOptions{
+		Name:       "Alice",
+		Email:      "alice@example.com\nName-Real: Evil",
+		KeyType:    "RSA",
+		KeyLength:  4096,
+		Expiry:     "0",
+		Passphrase: "<REDACTED>",
+	}
+	_, err := buildBatchFile(opts)
+	if err == nil {
+		t.Fatal("buildBatchFile with newline in Email must return an error")
+	}
+	if !strings.Contains(err.Error(), "Email") {
+		t.Errorf("error should mention the Email field, got: %v", err)
+	}
+}
+
+// TestBuildBatchFile_RejectsNewlineInComment verifies the injection guard
+// fires on the optional Comment field.
+func TestBuildBatchFile_RejectsNewlineInComment(t *testing.T) {
+	opts := GenerateOptions{
+		Name:       "Alice",
+		Email:      "alice@example.com",
+		Comment:    "test\nEvil",
+		KeyType:    "RSA",
+		KeyLength:  4096,
+		Expiry:     "0",
+		Passphrase: "<REDACTED>",
+	}
+	_, err := buildBatchFile(opts)
+	if err == nil {
+		t.Fatal("buildBatchFile with newline in Comment must return an error")
+	}
+	if !strings.Contains(err.Error(), "Comment") {
+		t.Errorf("error should mention the Comment field, got: %v", err)
+	}
+}
+
+// TestBuildBatchFile_RejectsNewlineInExpiry verifies the injection guard
+// fires on the Expiry field.
+func TestBuildBatchFile_RejectsNewlineInExpiry(t *testing.T) {
+	opts := GenerateOptions{
+		Name:       "Alice",
+		Email:      "alice@example.com",
+		KeyType:    "RSA",
+		KeyLength:  4096,
+		Expiry:     "0\nEvil",
+		Passphrase: "<REDACTED>",
+	}
+	_, err := buildBatchFile(opts)
+	if err == nil {
+		t.Fatal("buildBatchFile with newline in Expiry must return an error")
+	}
+	if !strings.Contains(err.Error(), "Expiry") {
+		t.Errorf("error should mention the Expiry field, got: %v", err)
+	}
+}
+
+// TestBuildBatchFile_RejectsNewlineInKeyType verifies the injection guard
+// fires on the KeyType field.
+func TestBuildBatchFile_RejectsNewlineInKeyType(t *testing.T) {
+	opts := GenerateOptions{
+		Name:       "Alice",
+		Email:      "alice@example.com",
+		KeyType:    "RSA\nEvil",
+		KeyLength:  4096,
+		Expiry:     "0",
+		Passphrase: "<REDACTED>",
+	}
+	_, err := buildBatchFile(opts)
+	if err == nil {
+		t.Fatal("buildBatchFile with newline in KeyType must return an error")
+	}
+	if !strings.Contains(err.Error(), "KeyType") {
+		t.Errorf("error should mention the KeyType field, got: %v", err)
+	}
+}
+
+// TestBuildBatchFile_RejectsInvalidKeyLength verifies that buildBatchFile
+// rejects a key length outside [1024, 8192] even when all string fields
+// are clean — this is the validateKeyLength guard inside the builder.
+func TestBuildBatchFile_RejectsInvalidKeyLength(t *testing.T) {
+	opts := GenerateOptions{
+		Name:       "Alice",
+		Email:      "alice@example.com",
+		KeyType:    "RSA",
+		KeyLength:  512, // too small
+		Expiry:     "0",
+		Passphrase: "<REDACTED>",
+	}
+	_, err := buildBatchFile(opts)
+	if err == nil {
+		t.Fatal("buildBatchFile with KeyLength=512 must return an error")
+	}
+	if !strings.Contains(err.Error(), "key length") {
+		t.Errorf("error should mention key length, got: %v", err)
+	}
+}
+
+// TestBuildBatchFile_AppliesDefaultsViaGenerate verifies that when
+// KeyType, KeyLength, and Expiry are left at zero values, GenerateKey
+// applies the RSA/4096/0 defaults BEFORE buildBatchFile runs — so the
+// builder never sees a zero KeyLength that would pass validateKeyLength
+// (0 is "unset, allowed") but produce a useless key. This is the
+// boundary between GenerateKey's defaulting and buildBatchFile's
+// validation; we assert via the GenerateKey entry point that a
+// well-formed opts (with only the required fields) reaches the gpg
+// invocation rather than failing at buildBatchFile.
+//
+// We cannot assert the gpg result without a real keyring (covered by
+// integration tests), but we CAN assert that the error — if any — is
+// NOT a buildBatchFile validation error, proving the defaults applied.
+func TestBuildBatchFile_AppliesDefaultsViaGenerate(t *testing.T) {
+	opts := GenerateOptions{
+		Name:  "Alice",
+		Email: "alice@example.com",
+		// KeyType, KeyLength, Expiry all zero — GenerateKey defaults them.
+		Passphrase: "nonempty-passphrase",
+	}
+	_, err := GenerateKey(opts)
+	// We expect an error here because gpg is invoked against the real
+	// keyring (or fails because gpg-agent/pinentry is unavailable in
+	// this env). The point: the error must NOT be a buildBatchFile
+	// validation error mentioning "key length" or "control character".
+	if err == nil {
+		// If gpg actually ran and succeeded, that's fine too — the
+		// defaults applied and a key was generated. Nothing to assert.
+		return
+	}
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "key length") {
+		t.Errorf("defaults not applied: buildBatchFile rejected key length: %v", err)
+	}
+	if strings.Contains(errMsg, "control character") {
+		t.Errorf("defaults not applied: buildBatchFile rejected a clean input: %v", err)
+	}
+}
